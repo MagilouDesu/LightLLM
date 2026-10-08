@@ -51,7 +51,7 @@ class MooncakeKVTransporter:
         # https://kvcache-ai.github.io/Mooncake/getting_started/supported-protocols.html
         protocol = os.environ.get("MOONCAKE_INITIALIZE_PROTOCOL", protocol)
         # 预设值空自动发现或指定设备
-        device_name = os.environ.get("MOONCAKE_INITIALIZE_DEVCIES", "auto-discovery")
+        device_name = os.environ.get("MOONCAKE_INITIALIZE_DEVICES", "auto-discovery")
         ret = self.engine.initialize(self.host_ip, "P2PHANDSHAKE", protocol, device_name)
         if ret != 0:
             raise RuntimeError(

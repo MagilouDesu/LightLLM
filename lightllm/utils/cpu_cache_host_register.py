@@ -146,3 +146,44 @@ def _metax_ops() -> HostRegisterOps:
             return device_ptr.value
 
     return MacaHostRegisterOps()
+
+
+@register_host_register_worker("musa")
+def _musa_ops() -> HostRegisterOps:
+
+    class MusaHostRegisterOps(HostRegisterOps):
+
+        def __init__(self):
+            import torch_musa  # noqa: F401
+
+            musa_home = os.getenv("MUSA_HOME", "/usr/local/musa")
+            musa = ctypes.CDLL(os.path.join(musa_home, "lib", "libmusart.so"))
+            musa.musaHostRegister.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint]
+            musa.musaHostRegister.restype = ctypes.c_int
+            musa.musaHostGetDevicePointer.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.c_uint]
+            musa.musaHostGetDevicePointer.restype = ctypes.c_int
+            self.musa = musa
+            # /usr/local/musa-5.2/include/driver_types.h: musaHostRegisterPortable | musaHostRegisterMapped
+            self.flag = 0x01 | 0x02
+            self.device_id = get_current_device_id()
+            torch.musa.set_device(self.device_id)
+
+        def register_segment(self, shm_ptr: int, offset: int, seg_len: int) -> None:
+            torch.musa.set_device(self.device_id)
+            ptr = ctypes.c_void_p(shm_ptr + offset)
+            r = self.musa.musaHostRegister(ptr, ctypes.c_size_t(seg_len), self.flag)
+            if r != 0:
+                raise Exception(f"musaHostRegister failed with error code {r}, prefer to use hugetlb")
+
+        def get_device_ptr(self, shm_ptr: int) -> int:
+            device_ptr = ctypes.c_void_p()
+            host_ptr = ctypes.c_void_p(shm_ptr)
+            res = self.musa.musaHostGetDevicePointer(ctypes.byref(device_ptr), host_ptr, 0)
+            if res != 0:
+                raise Exception(f"musaHostGetDevicePointer failed with error code {res}")
+            logger.info(
+                f"musaHostGetDevicePointer success, host_ptr={host_ptr.value}, device_ptr={device_ptr.value}"
+            )
+            return device_ptr.value
+
+    return MusaHostRegisterOps()
