@@ -100,12 +100,23 @@ class LinearAttCacheConfig:
         return triton.cdiv(a + b + c, 16) * 16
 
     def get_cpu_cache_full_att_bytes(self):
-        big_page_token_num = (
-            get_env_start_args().linear_att_page_block_num * get_env_start_args().linear_att_hash_page_size
-        )
-        assert big_page_token_num == get_env_start_args().cpu_cache_token_page_size
-        full_att_bytes = 2 * self.full_att_all_num_kv_heads * self.full_att_head_dim * self.full_att_dtype.itemsize
-        a = full_att_bytes * self.get_full_att_kv_layer_num_with_draft_model() * big_page_token_num
+        args = get_env_start_args()
+        big_page_token_num = args.linear_att_page_block_num * args.linear_att_hash_page_size
+        assert big_page_token_num == args.cpu_cache_token_page_size
+        # 沐曦的 int8kv 需要额外存储 scale 数据，CUDA 和 NPU 暂不支持。
+        if args.hardware_platform == "maca" and args.llm_kv_type == "int8kv":
+            group = args.llm_kv_quant_group_size
+            assert self.full_att_head_dim % group == 0
+            per_token = (
+                2 * self.full_att_all_num_kv_heads * self.full_att_head_dim
+                + 2
+                * self.full_att_all_num_kv_heads
+                * (self.full_att_head_dim // group)
+                * self.full_att_dtype.itemsize
+            )
+        else:
+            per_token = 2 * self.full_att_all_num_kv_heads * self.full_att_head_dim * self.full_att_dtype.itemsize
+        a = per_token * self.get_full_att_kv_layer_num_with_draft_model() * big_page_token_num
         return a
 
     def get_cpu_cache_conv_bytes(self):

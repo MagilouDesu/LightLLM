@@ -24,6 +24,9 @@ class LinearAttMemOperator(BaseMemManagerOperator):
         super().__init__(mem_manager)
         self.linear_config = LinearAttCacheConfig.load_from_args()
 
+    def _cpu_cache_kv_scale(self):
+        return None
+
     def load_cpu_cache_to_gpu(
         self,
         mem_indexes: torch.Tensor,
@@ -90,6 +93,7 @@ class LinearAttMemOperator(BaseMemManagerOperator):
             tp_world_size=get_dp_world_size(),
             big_page_token_num=args.cpu_cache_token_page_size,
             linear_config=self.linear_config,
+            gpu_kv_scale_state=self._cpu_cache_kv_scale(),
         )
 
         from lightllm.server.router.model_infer.infer_batch import g_infer_context
@@ -186,6 +190,7 @@ class LinearAttMemOperator(BaseMemManagerOperator):
             tp_world_size=get_dp_world_size(),
             big_page_token_num=args.cpu_cache_token_page_size,
             linear_config=self.linear_config,
+            gpu_kv_scale_state=self._cpu_cache_kv_scale(),
         )
         return
 
@@ -242,11 +247,24 @@ class Int8KVLinearAttMemOperator(LinearAttMemOperator):
         copy_kv_buffer_to_kv_buffer(src_mem_index, dst_mem_index, self.mem_manager.scale_buffer)
         return
 
-    def load_cpu_cache_to_gpu(self, *args, **kwargs):
-        raise NotImplementedError("CPU KV cache is not implemented for Qwen3.6 INT8 KV")
+    def _maca_int8_cpu_cache(self) -> bool:
+        args = get_env_start_args()
+        return args.hardware_platform == "maca" and args.llm_kv_type == "int8kv"
 
-    def offload_gpu_kv_to_cpu_cache(self, *args, **kwargs):
-        raise NotImplementedError("CPU KV cache is not implemented for Qwen3.6 INT8 KV")
+    def _cpu_cache_kv_scale(self):
+        if not self._maca_int8_cpu_cache():
+            return None
+        return self.mem_manager.scale_buffer
+
+    def load_cpu_cache_to_gpu(self, mem_indexes, page_indexes, cpu_cache_client, req):
+        if not self._maca_int8_cpu_cache():
+            raise NotImplementedError("CPU KV cache is not implemented for Qwen3.6 INT8 KV")
+        return super().load_cpu_cache_to_gpu(mem_indexes, page_indexes, cpu_cache_client, req)
+
+    def offload_gpu_kv_to_cpu_cache(self, mem_indexes, page_indexes, page_readies, cpu_cache_client, req):
+        if not self._maca_int8_cpu_cache():
+            raise NotImplementedError("CPU KV cache is not implemented for Qwen3.6 INT8 KV")
+        return super().offload_gpu_kv_to_cpu_cache(mem_indexes, page_indexes, page_readies, cpu_cache_client, req)
 
 
 class NpuLinearAttMemOperator(LinearAttMemOperator):
