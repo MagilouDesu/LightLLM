@@ -37,10 +37,11 @@ class CpuKvCacheClient(object):
                 size_bytes=self.kv_cache_tensor_meta.calcu_size(),
             )
             tensor_creator = CpuCacheCreator(tensor_spec=tensor_spec)
-            self.cpu_kv_cache_tensor = tensor_creator.create_or_attach(
+            cache = tensor_creator.create_or_attach(
                 init_shm_data=init_shm_data,
                 pin=not init_shm_data,
             )
+            self.cpu_kv_cache_tensor = cache if isinstance(cache, list) else [cache]
         return
 
     def get_one_empty_page(self, hash_key: int, disk_offload_enable: bool) -> Optional[int]:

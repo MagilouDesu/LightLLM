@@ -32,10 +32,13 @@ class QuantScaleMemOperator(BaseMemManagerOperator):
         mem_manager: MemoryManager = self.mem_manager
 
         cpu_cache_meta = cpu_cache_client.kv_cache_tensor_meta
-        cpu_kv_cache = cpu_cache_client.cpu_kv_cache_tensor[:, :, :, :, 0 : cpu_cache_meta.head_dim]
-        cpu_kv_cache_scale = cpu_cache_client.cpu_kv_cache_tensor[:, :, :, :, cpu_cache_meta.head_dim :].view(
-            mem_manager.scale_buffer.dtype
-        )
+        cpu_kv_cache = [
+            chunk[:, :, :, :, 0 : cpu_cache_meta.head_dim] for chunk in cpu_cache_client.cpu_kv_cache_tensor
+        ]
+        cpu_kv_cache_scale = [
+            chunk[:, :, :, :, cpu_cache_meta.head_dim :].view(mem_manager.scale_buffer.dtype)
+            for chunk in cpu_cache_client.cpu_kv_cache_tensor
+        ]
 
         from lightllm.common.basemodel.triton_kernel.kv_cache_offload import load_cpu_kv_to_gpu
 
@@ -69,10 +72,13 @@ class QuantScaleMemOperator(BaseMemManagerOperator):
         mem_manager: MemoryManager = self.mem_manager
 
         cpu_cache_meta = cpu_cache_client.kv_cache_tensor_meta
-        cpu_kv_cache = cpu_cache_client.cpu_kv_cache_tensor[:, :, :, :, 0 : cpu_cache_meta.head_dim]
-        cpu_kv_cache_scale = cpu_cache_client.cpu_kv_cache_tensor[:, :, :, :, cpu_cache_meta.head_dim :].view(
-            mem_manager.scale_buffer.dtype
-        )
+        cpu_kv_cache = [
+            chunk[:, :, :, :, 0 : cpu_cache_meta.head_dim] for chunk in cpu_cache_client.cpu_kv_cache_tensor
+        ]
+        cpu_kv_cache_scale = [
+            chunk[:, :, :, :, cpu_cache_meta.head_dim :].view(mem_manager.scale_buffer.dtype)
+            for chunk in cpu_cache_client.cpu_kv_cache_tensor
+        ]
 
         from lightllm.common.basemodel.triton_kernel.kv_cache_offload import offload_gpu_kv_to_cpu
 

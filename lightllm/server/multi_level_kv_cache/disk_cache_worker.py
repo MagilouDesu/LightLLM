@@ -58,7 +58,8 @@ class DiskCacheWorker:
         cache_file = os.path.join(cache_dir, "cache_file")
 
         self.max_concurrent_write_tasks = max_concurrent_write_tasks
-        self._page_major_tensor = self._prepare_tensor(cpu_cache_client.cpu_kv_cache_tensor)
+        assert len(cpu_cache_client.cpu_kv_cache_tensor) == 1
+        self._page_major_tensor = self._prepare_tensor(cpu_cache_client.cpu_kv_cache_tensor[0])
 
         self.service = PyLocalCacheService(
             kvcache_tensor=self._page_major_tensor,

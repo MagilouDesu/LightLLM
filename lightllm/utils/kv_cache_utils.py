@@ -26,7 +26,7 @@ from lightllm.common.kv_cache_mem_manager import (
     Qwen3NextMemManager,
 )
 
-from typing import List, Tuple
+from typing import List, Tuple, Union
 from tqdm import tqdm
 from lightllm.utils.auto_shm_cleanup import register_sysv_shm_for_cleanup
 from lightllm.common.linear_att_cache_manager.config_objs import LinearAttCacheConfig
@@ -245,17 +245,43 @@ def create_shm_kv_cache_ptr(key: int, size: int) -> int:
     return shm_addr
 
 
-@lru_cache(maxsize=None)
-def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> int:
-    """Synchronously host-register [shm_ptr, shm_ptr+size) via platform worker."""
-    ops = get_host_register_worker()
-    chunk_bytes = ops.registration_chunk_bytes(size)
-    tasks: list[tuple[int, int]] = []
+def split_host_register_segments(size: int, chunk_bytes: int, align_bytes: int = 1) -> List[Tuple[int, int]]:
+    if chunk_bytes <= 0:
+        raise RuntimeError(f"host register chunk size must be positive, got {chunk_bytes}")
+    if align_bytes > 1:
+        if align_bytes > chunk_bytes:
+            raise RuntimeError(
+                f"cpu cache page ({align_bytes} bytes) is larger than one host register ({chunk_bytes} bytes)"
+            )
+        chunk_bytes = (chunk_bytes // align_bytes) * align_bytes
+    segments: List[Tuple[int, int]] = []
     offset = 0
     while offset < size:
         seg_len = min(chunk_bytes, size - offset)
-        tasks.append((offset, seg_len))
+        segments.append((offset, seg_len))
         offset += seg_len
+    return segments
+
+
+@lru_cache(maxsize=None)
+def register_shm_ptr_to_pin(
+    shm_ptr: int,
+    size: int,
+    align_bytes: int = 1,
+) -> Union[int, Tuple[Tuple[int, int], ...]]:
+    ops = get_host_register_worker()
+    chunk_bytes = ops.registration_chunk_bytes(size)
+    contiguous = ops.host_register_mappings_are_contiguous()
+    # 地址连续时保持平台自己的段长。不连续时按调用方给的页大小对齐，避免一页跨两段。
+    align = 1 if contiguous else align_bytes
+    tasks = split_host_register_segments(size, chunk_bytes, align)
+    if not contiguous and len(tasks) > 1:
+        logger.info(
+            "pinned host memory in %s segments, segment_bytes=%s, size=%s",
+            len(tasks),
+            tasks[0][1],
+            size,
+        )
 
     desc = f"pid {os.getpid()} Registering pinned host memory"
 
@@ -271,7 +297,9 @@ def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> int:
             for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc=desc):
                 future.result()
 
-    return ops.get_device_ptr(shm_ptr)
+    if contiguous or len(tasks) == 1:
+        return ops.get_device_ptr(shm_ptr)
+    return tuple((ops.get_device_ptr(shm_ptr + offset), seg_len) for offset, seg_len in tasks)
 
 
 @lru_cache(maxsize=None)

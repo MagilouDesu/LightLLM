@@ -1,6 +1,7 @@
 import torch
 import triton
 import triton.language as tl
+from lightllm.common.cpu_cache.chunks import iter_page_chunk_slices
 from lightllm.common.linear_att_cache_manager.config_objs import LinearAttCacheConfig
 from lightllm.common.basemodel.triton_kernel.linear_att_copy import _npu_vector_core_count
 
@@ -557,6 +558,33 @@ def copy_kv_buffer_to_cpu_cache(
 ):
     assert len(page_indexes) == len(page_readies) == len(big_page_buffer_ids)
     assert len(mem_indexes) % len(page_indexes) == 0
+    if len(cpu_cache_tensor) != 1:
+        token_block = len(mem_indexes) // len(page_indexes)
+        for _, chunk, local_pages, mem_slice, (ready_slice, big_slice) in iter_page_chunk_slices(
+            cpu_cache_tensor,
+            page_indexes,
+            mem_indexes,
+            token_block,
+            [page_readies, big_page_buffer_ids],
+        ):
+            copy_kv_buffer_to_cpu_cache(
+                mem_indexes=mem_slice,
+                page_indexes=local_pages,
+                page_readies=ready_slice,
+                big_page_buffer_ids=big_slice,
+                gpu_kv_full_att_state=gpu_kv_full_att_state,
+                cpu_kv_conv_state=cpu_kv_conv_state,
+                cpu_kv_ssm_state=cpu_kv_ssm_state,
+                cpu_cache_tensor=[chunk],
+                tp_rank=tp_rank,
+                tp_world_size=tp_world_size,
+                big_page_token_num=big_page_token_num,
+                linear_config=linear_config,
+                gpu_kv_scale_state=gpu_kv_scale_state,
+                grid_num=grid_num,
+            )
+        return
+    cpu_cache_tensor = cpu_cache_tensor[0]
 
     BLOCK = 4096
     if linear_config.full_att_all_num_kv_heads % tp_world_size == 0:
@@ -847,6 +875,32 @@ def copy_cpu_cache_to_kv_buffer(
     grid_num: int = 12,
 ):
     assert len(mem_indexes) % len(page_indexes) == 0
+    if len(cpu_cache_tensor) != 1:
+        token_block = len(mem_indexes) // len(page_indexes)
+        for _, chunk, local_pages, mem_slice, (big_slice,) in iter_page_chunk_slices(
+            cpu_cache_tensor,
+            page_indexes,
+            mem_indexes,
+            token_block,
+            [big_page_buffer_ids],
+        ):
+            copy_cpu_cache_to_kv_buffer(
+                mem_indexes=mem_slice,
+                big_page_buffer_ids=big_slice,
+                page_indexes=local_pages,
+                gpu_full_att_kv_state=gpu_full_att_kv_state,
+                cpu_kv_conv_state=cpu_kv_conv_state,
+                cpu_kv_ssm_state=cpu_kv_ssm_state,
+                cpu_cache_tensor=[chunk],
+                tp_rank=tp_rank,
+                tp_world_size=tp_world_size,
+                big_page_token_num=big_page_token_num,
+                linear_config=linear_config,
+                gpu_kv_scale_state=gpu_kv_scale_state,
+                grid_num=grid_num,
+            )
+        return
+    cpu_cache_tensor = cpu_cache_tensor[0]
 
     BLOCK = 4096
     if linear_config.full_att_all_num_kv_heads % tp_world_size == 0:

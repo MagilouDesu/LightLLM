@@ -4,6 +4,8 @@ import triton
 import triton.language as tl
 from typing import Optional
 
+from lightllm.common.cpu_cache.chunks import iter_page_chunk_slices
+
 
 @triton.jit
 def _offload_gpu_kv_to_cpu(
@@ -192,6 +194,36 @@ def offload_gpu_kv_to_cpu(
         page_indexes: (page_num,)
         page_readies: (page_num,)
     """
+    if len(cpu_kv_cache) != 1:
+        token_block_size = cpu_kv_cache[0].shape[2]
+        token_num = token_indexes.shape[0]
+        assert token_num == page_indexes.shape[0] * token_block_size
+        assert page_indexes.shape == page_readies.shape
+        for chunk_id, chunk, local_pages, mem_slice, (ready_slice,) in iter_page_chunk_slices(
+            cpu_kv_cache,
+            page_indexes,
+            token_indexes,
+            token_block_size,
+            [page_readies],
+        ):
+            offload_gpu_kv_to_cpu(
+                token_indexes=mem_slice,
+                gpu_kv_cache=gpu_kv_cache,
+                gpu_kv_cache_scale=gpu_kv_cache_scale,
+                cpu_kv_cache=[chunk],
+                cpu_kv_cache_scale=None if cpu_kv_cache_scale is None else [cpu_kv_cache_scale[chunk_id]],
+                page_indexes=local_pages,
+                page_readies=ready_slice,
+                tp_index=tp_index,
+                tp_world_size=tp_world_size,
+                grid_num=grid_num,
+                _cache_data=_cache_data,
+            )
+        return
+    cpu_kv_cache = cpu_kv_cache[0]
+    if cpu_kv_cache_scale is not None:
+        cpu_kv_cache_scale = cpu_kv_cache_scale[0]
+
     token_block_size = cpu_kv_cache.shape[2]
     token_num = token_indexes.shape[0]
     assert token_num == page_indexes.shape[0] * token_block_size
@@ -544,6 +576,35 @@ def load_cpu_kv_to_gpu(
         cpu_kv_cache: (all_page_num, layer_num, token_block_size, head_num, head_dim)
         page_indexes: (page_num,)
     """
+    if len(cpu_kv_cache) != 1:
+        token_block_size = cpu_kv_cache[0].shape[2]
+        cpu_page_num = page_indexes.shape[0]
+        cpu_page_all_token_num = cpu_page_num * token_block_size
+        assert gpu_mem_indexes.shape[0] <= cpu_page_all_token_num
+        for chunk_id, chunk, local_pages, mem_slice, _ in iter_page_chunk_slices(
+            cpu_kv_cache,
+            page_indexes,
+            gpu_mem_indexes,
+            token_block_size,
+            [],
+        ):
+            load_cpu_kv_to_gpu(
+                gpu_mem_indexes=mem_slice,
+                gpu_kv_cache=gpu_kv_cache,
+                gpu_kv_cache_scale=gpu_kv_cache_scale,
+                cpu_kv_cache=[chunk],
+                cpu_kv_cache_scale=None if cpu_kv_cache_scale is None else [cpu_kv_cache_scale[chunk_id]],
+                page_indexes=local_pages,
+                tp_index=tp_index,
+                tp_world_size=tp_world_size,
+                grid_num=grid_num,
+                _cache_data=_cache_data,
+            )
+        return
+    cpu_kv_cache = cpu_kv_cache[0]
+    if cpu_kv_cache_scale is not None:
+        cpu_kv_cache_scale = cpu_kv_cache_scale[0]
+
     token_block_size = cpu_kv_cache.shape[2]
     cpu_page_num = page_indexes.shape[0]
     cpu_page_all_token_num = cpu_page_num * token_block_size

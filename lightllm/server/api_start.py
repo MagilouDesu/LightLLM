@@ -25,8 +25,20 @@ from lightllm.utils.config_utils import (
     auto_set_response_parsers,
 )
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
+from lightllm.utils.cpu_cache_host_register import MACA_HOST_REGISTER_LIMIT_BYTES
 
 logger = init_logger(__name__)
+
+
+def _check_maca_embed_cache_size(args: StartArgs):
+    if args.hardware_platform != "maca":
+        return
+    limit_gb = MACA_HOST_REGISTER_LIMIT_BYTES / (1024 ** 3)
+    if args.embed_cache_storage_size > limit_gb:
+        raise ValueError(
+            f"--embed_cache_storage_size {args.embed_cache_storage_size}GB exceeds the {limit_gb:.0f}GB "
+            "host register limit on maca. Embed cache is not split across registers."
+        )
 
 
 def _set_envs_and_config(args: StartArgs):
@@ -105,6 +117,8 @@ def _launch_subprocesses(args: StartArgs):
             f"batch_max_tokens to 2048, chunked_prefill_size to 1024,"
             f"graph_max_batch_size to 32"
         )
+
+    _check_maca_embed_cache_size(args)
 
     if not args.disable_shm_warning:
         check_recommended_shm_size(args)
@@ -540,6 +554,7 @@ def visual_only_start(args):
     from lightllm.server.core.objs.start_args_type import StartArgs
 
     args: StartArgs = args
+    _check_maca_embed_cache_size(args)
     _set_envs_and_config(args)
     if args.afs_image_embed_dir is not None:
         os.makedirs(args.afs_image_embed_dir, mode=0o777, exist_ok=True)

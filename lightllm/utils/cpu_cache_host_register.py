@@ -1,5 +1,7 @@
 import os
 import ctypes
+import ctypes.util
+import threading
 import torch
 from typing import Callable, Dict
 from lightllm.utils.dist_utils import get_current_device_id
@@ -9,11 +11,70 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 
 
+# 单次注册段长，单位 GB，默认 16。MACA 3.1.0.14 还会要求空闲显存大于这段长度，
+# 各进程在第一次 mcHostRegister 前把这道比较跳过。主机 MemFree * 0.8 的检查保留。
+MACA_HOST_REGISTER_LIMIT_BYTES = int(os.getenv("MACA_HOST_REGISTER_LIMIT_GB", 16)) * 1024 * 1024 * 1024
+
+# cmp rbx, r14; jae fail; cmp [rsp+0x20], rbx; ja ok
+_MACA_GPU_FREE_CHECK = bytes.fromhex("4c39f3730b48395c24200f87")
+_MACA_GPU_FREE_PATCHED = bytes.fromhex("4c39f3730b48395c2420e9")
+_maca_patch_lock = threading.Lock()
+
+
+def patch_mc_host_register_gpu_free_check(soname: str = "libmcruntime.so") -> int:
+    """ 跳过本进程 mcHostRegister 里「空闲显存必须大于注册长度」的比较。 """
+    with _maca_patch_lock:
+        regions = []
+        with open("/proc/self/maps") as f:
+            for line in f:
+                if soname not in line:
+                    continue
+                span, perm = line.split()[:2]
+                if "x" not in perm:
+                    continue
+                start, end = (int(x, 16) for x in span.split("-"))
+                regions.append((start, end))
+        if not regions:
+            raise RuntimeError(f"{soname} is not loaded")
+
+        libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+        for start, end in regions:
+            size = end - start
+            blob = bytes((ctypes.c_char * size).from_address(start))
+            done = blob.find(_MACA_GPU_FREE_PATCHED)
+            if done != -1:
+                return start + done
+
+            hit = blob.find(_MACA_GPU_FREE_CHECK)
+            if hit == -1:
+                continue
+
+            if blob.find(_MACA_GPU_FREE_CHECK, hit + 1) != -1:
+                raise RuntimeError("mcHostRegister gpu-free check matched more than once")
+
+            ja = start + hit + len(_MACA_GPU_FREE_CHECK) - 2
+            rel = int.from_bytes((ctypes.c_char * 4).from_address(ja + 2), "little", signed=True)
+            # ja 是 6 字节，jmp 是 5 字节，目标不变，位移加 1，末尾补 nop
+            new = b"\xe9" + (rel + 1).to_bytes(4, "little", signed=True) + b"\x90"
+            page = ja & ~0xFFF
+            rc = libc.mprotect(ctypes.c_void_p(page), 0x2000, 7)
+            if rc != 0:
+                raise OSError(ctypes.get_errno(), "mprotect")
+            ctypes.memmove(ja, new, 6)
+            logger.info("patched mcHostRegister gpu-free check at %#x pid=%s", ja, os.getpid())
+            return ja
+
+        raise RuntimeError("mcHostRegister gpu-free check not found; MACA version differs")
+
+
 class HostRegisterOps:
 
     def registration_chunk_bytes(self, size: int) -> int:
         # 在 CUDA 中分段注册后的设备地址仍然连续
         return 128 * 1024 * 1024
+
+    def host_register_mappings_are_contiguous(self) -> bool:
+        return True
 
     def register_segment(self, shm_ptr: int, offset: int, seg_len: int) -> None:
         raise NotImplementedError
@@ -122,10 +183,14 @@ def _metax_ops() -> HostRegisterOps:
             self.flag = 3
             self.device_id = get_current_device_id()
             torch.cuda.set_device(self.device_id)
+            patch_mc_host_register_gpu_free_check()
 
         def registration_chunk_bytes(self, size: int) -> int:
-            # 沐曦下，分段注册的地址不连续，所以需要返回整个范围的大小
-            return size
+            # 段长由 MACA_HOST_REGISTER_LIMIT_GB 控制，分段后的设备地址不连续。
+            return min(size, MACA_HOST_REGISTER_LIMIT_BYTES)
+
+        def host_register_mappings_are_contiguous(self) -> bool:
+            return False
 
         def register_segment(self, shm_ptr: int, offset: int, seg_len: int) -> None:
             torch.cuda.set_device(self.device_id)
