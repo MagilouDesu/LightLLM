@@ -347,16 +347,28 @@ def get_vocab_size(model_path: str):
         if "llm_config" in config_json:
             vocab_size = int(config_json["llm_config"]["vocab_size"])
             return vocab_size
-        elif "text_config" in config_json:
+        elif "text_config" in config_json and "vocab_size" in config_json["text_config"]:
             vocab_size = int(config_json["text_config"]["vocab_size"])
             return vocab_size
-        vocab_size = config_json["vocab_size"]
-        if not isinstance(vocab_size, int):
-            vocab_size = int(vocab_size)
-        return vocab_size
-    except:
+        if "vocab_size" in config_json:
+            vocab_size = config_json["vocab_size"]
+            if not isinstance(vocab_size, int):
+                vocab_size = int(vocab_size)
+            return vocab_size
+        # Some checkpoints omit vocab_size and rely on the architecture default.
+        from transformers import AutoConfig
+
+        cfg = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        text_cfg = getattr(cfg, "text_config", None) or getattr(cfg, "llm_config", None)
+        if text_cfg is not None and getattr(text_cfg, "vocab_size", None):
+            return int(text_cfg.vocab_size)
+        if getattr(cfg, "vocab_size", None):
+            return int(cfg.vocab_size)
+    except Exception:
         logger.error("can not get vocab_size from config.json, return 0")
         return 0
+    logger.error("can not get vocab_size from config.json, return 0")
+    return 0
 
 
 def get_dtype(model_path: str):

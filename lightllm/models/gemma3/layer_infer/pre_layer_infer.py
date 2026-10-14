@@ -7,7 +7,11 @@ from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalP
 class Gemma3PreLayerInfer(LlamaMultimodalPreLayerInfer):
     def __init__(self, network_config):
         super().__init__(network_config)
-        self.embed_scale = torch.tensor(network_config["hidden_size"] ** 0.5, dtype=torch.float32)
+        self.embed_scale = torch.tensor(
+            network_config["hidden_size"] ** 0.5,
+            dtype=torch.float32,
+            device=torch.device("cuda", torch.cuda.current_device()),
+        )
         self.boi_token_index: int = 255_999
         self.eoi_token_index: int = 256_000
         return
@@ -86,4 +90,4 @@ class Gemma3PreLayerInfer(LlamaMultimodalPreLayerInfer):
     def token_forward(self, input_ids, infer_state, layer_weight):
         input_embedding = super().token_forward(input_ids, infer_state, layer_weight)
         input_dtype = input_embedding.dtype
-        return (input_embedding.float() * self.embed_scale.to(input_embedding.device).float()).to(input_dtype)
+        return (input_embedding.float() * self.embed_scale).to(input_dtype)

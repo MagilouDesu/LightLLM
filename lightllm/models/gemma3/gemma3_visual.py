@@ -51,9 +51,12 @@ class Gemma3VisionModel:
             weight_dir,
             torch_dtype=torch.float16,
         )
-        self.vision_tower = model.vision_tower
-        model.multi_modal_projector = None
-        model.language_model = None
+        # Older transformers keeps the tower on Gemma3ForConditionalGeneration.
+        # transformers 5.x nests it under Gemma3Model.
+        tower_owner = model if hasattr(model, "vision_tower") else model.model
+        self.vision_tower = tower_owner.vision_tower
+        tower_owner.multi_modal_projector = None
+        tower_owner.language_model = None
 
         # load projector weights
         self.projector_weights = {}

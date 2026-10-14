@@ -16,12 +16,17 @@ class Gemma3TransformerLayerWeight(LlamaTransformerLayerWeight):
 
     def _init_weight_names(self):
         super()._init_weight_names()
-        self._att_norm_weight_name = f"model.layers.{self.layer_num_}.input_layernorm.weight"
-        self._k_norm_weight_name = f"model.layers.{self.layer_num_}.self_attn.k_norm.weight"
-        self._q_norm_weight_name = f"model.layers.{self.layer_num_}.self_attn.q_norm.weight"
-        self._ffn_norm_weight_name = f"model.layers.{self.layer_num_}.post_attention_layernorm.weight"
-        self._pre_feedforward_layernorm_name = f"model.layers.{self.layer_num_}.pre_feedforward_layernorm.weight"
-        self._post_feedforward_layernorm_name = f"model.layers.{self.layer_num_}.post_feedforward_layernorm.weight"
+        # HF Gemma3 checkpoints store the language stack under language_model.model.*
+        for attr, value in list(vars(self).items()):
+            if isinstance(value, str) and value.startswith("model.layers."):
+                setattr(self, attr, "language_model." + value)
+        layer = f"language_model.model.layers.{self.layer_num_}"
+        self._att_norm_weight_name = f"{layer}.input_layernorm.weight"
+        self._k_norm_weight_name = f"{layer}.self_attn.k_norm.weight"
+        self._q_norm_weight_name = f"{layer}.self_attn.q_norm.weight"
+        self._ffn_norm_weight_name = f"{layer}.post_attention_layernorm.weight"
+        self._pre_feedforward_layernorm_name = f"{layer}.pre_feedforward_layernorm.weight"
+        self._post_feedforward_layernorm_name = f"{layer}.post_feedforward_layernorm.weight"
 
     def _init_ffn(self):
         self.gate_proj = ROWMMWeight(
@@ -63,25 +68,32 @@ class Gemma3TransformerLayerWeight(LlamaTransformerLayerWeight):
         super()._init_qkv()
 
     def _init_norm(self):
-        super()._init_norm()
-
+        # Gemma RMSNorm stores (1 + weight). NoTpGEMMANormWeight applies that on load.
+        self.att_norm_weight_ = NoTpGEMMANormWeight(
+            dim=self.n_embed,
+            weight_name=self._att_norm_weight_name,
+            data_type=self.data_type_,
+        )
+        self.ffn_norm_weight_ = NoTpGEMMANormWeight(
+            dim=self.n_embed,
+            weight_name=self._ffn_norm_weight_name,
+            data_type=self.data_type_,
+        )
         self.k_norm_weight_ = NoTpGEMMANormWeight(
-            dim=self.head_dim_, weight_name=self._k_norm_weight_name, data_type=self.data_type_, bias_name=None
+            dim=self.head_dim, weight_name=self._k_norm_weight_name, data_type=self.data_type_
         )
         self.q_norm_weight_ = NoTpGEMMANormWeight(
-            dim=self.head_dim_, weight_name=self._q_norm_weight_name, data_type=self.data_type_, bias_name=None
+            dim=self.head_dim, weight_name=self._q_norm_weight_name, data_type=self.data_type_
         )
         self.pre_feedforward_layernorm_weight_ = NoTpGEMMANormWeight(
             dim=self.n_embed,
             weight_name=self._pre_feedforward_layernorm_name,
             data_type=self.data_type_,
-            bias_name=None,
         )
         self.post_feedforward_layernorm_weight_ = NoTpGEMMANormWeight(
             dim=self.n_embed,
             weight_name=self._post_feedforward_layernorm_name,
             data_type=self.data_type_,
-            bias_name=None,
         )
 
     def load_hf_weights(self, weights):
