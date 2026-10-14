@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import torch
 import triton
 import triton.language as tl
@@ -282,245 +280,6 @@ def conv_pack_gdn_decode_inputs_npu_contig(
 
 
 @triton.jit
-def _fused_gdn_decode_npu_kernel(
-    mixed_qkv,
-    conv_state,
-    conv_weight,
-    conv_bias,
-    conv_state_indices,
-    a_raw,
-    b_raw,
-    A_log,
-    dt_bias,
-    ssm_state,
-    ssm_state_indices,
-    output,
-    scale,
-    H: tl.constexpr,
-    HV: tl.constexpr,
-    K: tl.constexpr,
-    V: tl.constexpr,
-    Q_DIM: tl.constexpr,
-    K_DIM: tl.constexpr,
-    BK: tl.constexpr,
-    BV: tl.constexpr,
-    NV: tl.constexpr,
-    GVA: tl.constexpr,
-    stride_m_b: tl.constexpr,
-    stride_m_d: tl.constexpr,
-    stride_s_b: tl.constexpr,
-    stride_s_d: tl.constexpr,
-    stride_s_w: tl.constexpr,
-    stride_w_d: tl.constexpr,
-    stride_w_w: tl.constexpr,
-    stride_a_b: tl.constexpr,
-    stride_b_b: tl.constexpr,
-    stride_ssm: tl.constexpr,
-    stride_o_b: tl.constexpr,
-    HAS_BIAS: tl.constexpr,
-    APPLY_SILU: tl.constexpr,
-    BLOCKS: tl.constexpr,
-    SOFTPLUS_THRESHOLD: tl.constexpr,
-):
-    for block in range(tl.program_id(0), BLOCKS, tl.num_programs(0)):
-        value_tile = block % NV
-        head_batch = block // NV
-        row = head_batch // HV
-        i_hv = head_batch % HV
-        i_h = i_hv // GVA
-
-        conv_idx = tl.load(conv_state_indices + row).to(tl.int32)
-        ssm_idx = tl.load(ssm_state_indices + row).to(tl.int32)
-
-        key_offs = tl.arange(0, BK)
-        value_offs = value_tile * BV + tl.arange(0, BV)
-        key_mask = key_offs < K
-        value_mask = value_offs < V
-
-        q_ch = i_h * K + key_offs
-        k_ch = Q_DIM + i_h * K + key_offs
-        v_ch = Q_DIM + K_DIM + i_hv * V + value_offs
-        write_qk = (i_hv % GVA == 0) & (value_tile == 0)
-
-        x_q = tl.load(mixed_qkv + row * stride_m_b + q_ch * stride_m_d, mask=key_mask, other=0.0).to(tl.float32)
-        qs0 = tl.load(conv_state + conv_idx * stride_s_b + q_ch * stride_s_d, mask=key_mask, other=0.0).to(tl.float32)
-        qs1 = tl.load(
-            conv_state + conv_idx * stride_s_b + q_ch * stride_s_d + stride_s_w, mask=key_mask, other=0.0
-        ).to(tl.float32)
-        qs2 = tl.load(
-            conv_state + conv_idx * stride_s_b + q_ch * stride_s_d + 2 * stride_s_w, mask=key_mask, other=0.0
-        ).to(tl.float32)
-        query = (
-            qs0 * tl.load(conv_weight + q_ch * stride_w_d, mask=key_mask, other=0.0).to(tl.float32)
-            + qs1 * tl.load(conv_weight + q_ch * stride_w_d + stride_w_w, mask=key_mask, other=0.0).to(tl.float32)
-            + qs2 * tl.load(conv_weight + q_ch * stride_w_d + 2 * stride_w_w, mask=key_mask, other=0.0).to(tl.float32)
-            + x_q * tl.load(conv_weight + q_ch * stride_w_d + 3 * stride_w_w, mask=key_mask, other=0.0).to(tl.float32)
-        )
-        if HAS_BIAS:
-            query += tl.load(conv_bias + q_ch, mask=key_mask, other=0.0).to(tl.float32)
-        if APPLY_SILU:
-            query = query * tl.sigmoid(query)
-        if write_qk:
-            tl.store(conv_state + conv_idx * stride_s_b + q_ch * stride_s_d, qs1, mask=key_mask)
-            tl.store(conv_state + conv_idx * stride_s_b + q_ch * stride_s_d + stride_s_w, qs2, mask=key_mask)
-            tl.store(conv_state + conv_idx * stride_s_b + q_ch * stride_s_d + 2 * stride_s_w, x_q, mask=key_mask)
-
-        x_k = tl.load(mixed_qkv + row * stride_m_b + k_ch * stride_m_d, mask=key_mask, other=0.0).to(tl.float32)
-        ks0 = tl.load(conv_state + conv_idx * stride_s_b + k_ch * stride_s_d, mask=key_mask, other=0.0).to(tl.float32)
-        ks1 = tl.load(
-            conv_state + conv_idx * stride_s_b + k_ch * stride_s_d + stride_s_w, mask=key_mask, other=0.0
-        ).to(tl.float32)
-        ks2 = tl.load(
-            conv_state + conv_idx * stride_s_b + k_ch * stride_s_d + 2 * stride_s_w, mask=key_mask, other=0.0
-        ).to(tl.float32)
-        key = (
-            ks0 * tl.load(conv_weight + k_ch * stride_w_d, mask=key_mask, other=0.0).to(tl.float32)
-            + ks1 * tl.load(conv_weight + k_ch * stride_w_d + stride_w_w, mask=key_mask, other=0.0).to(tl.float32)
-            + ks2 * tl.load(conv_weight + k_ch * stride_w_d + 2 * stride_w_w, mask=key_mask, other=0.0).to(tl.float32)
-            + x_k * tl.load(conv_weight + k_ch * stride_w_d + 3 * stride_w_w, mask=key_mask, other=0.0).to(tl.float32)
-        )
-        if HAS_BIAS:
-            key += tl.load(conv_bias + k_ch, mask=key_mask, other=0.0).to(tl.float32)
-        if APPLY_SILU:
-            key = key * tl.sigmoid(key)
-        if write_qk:
-            tl.store(conv_state + conv_idx * stride_s_b + k_ch * stride_s_d, ks1, mask=key_mask)
-            tl.store(conv_state + conv_idx * stride_s_b + k_ch * stride_s_d + stride_s_w, ks2, mask=key_mask)
-            tl.store(conv_state + conv_idx * stride_s_b + k_ch * stride_s_d + 2 * stride_s_w, x_k, mask=key_mask)
-
-        x_v = tl.load(mixed_qkv + row * stride_m_b + v_ch * stride_m_d, mask=value_mask, other=0.0).to(tl.float32)
-        vs0 = tl.load(conv_state + conv_idx * stride_s_b + v_ch * stride_s_d, mask=value_mask, other=0.0).to(tl.float32)
-        vs1 = tl.load(
-            conv_state + conv_idx * stride_s_b + v_ch * stride_s_d + stride_s_w, mask=value_mask, other=0.0
-        ).to(tl.float32)
-        vs2 = tl.load(
-            conv_state + conv_idx * stride_s_b + v_ch * stride_s_d + 2 * stride_s_w, mask=value_mask, other=0.0
-        ).to(tl.float32)
-        value = (
-            vs0 * tl.load(conv_weight + v_ch * stride_w_d, mask=value_mask, other=0.0).to(tl.float32)
-            + vs1 * tl.load(conv_weight + v_ch * stride_w_d + stride_w_w, mask=value_mask, other=0.0).to(tl.float32)
-            + vs2 * tl.load(conv_weight + v_ch * stride_w_d + 2 * stride_w_w, mask=value_mask, other=0.0).to(tl.float32)
-            + x_v * tl.load(conv_weight + v_ch * stride_w_d + 3 * stride_w_w, mask=value_mask, other=0.0).to(tl.float32)
-        )
-        if HAS_BIAS:
-            value += tl.load(conv_bias + v_ch, mask=value_mask, other=0.0).to(tl.float32)
-        if APPLY_SILU:
-            value = value * tl.sigmoid(value)
-        tl.store(conv_state + conv_idx * stride_s_b + v_ch * stride_s_d, vs1, mask=value_mask)
-        tl.store(conv_state + conv_idx * stride_s_b + v_ch * stride_s_d + stride_s_w, vs2, mask=value_mask)
-        tl.store(conv_state + conv_idx * stride_s_b + v_ch * stride_s_d + 2 * stride_s_w, x_v, mask=value_mask)
-
-        query = query / tl.sqrt(tl.sum(query * query) + 1e-6)
-        key = key / tl.sqrt(tl.sum(key * key) + 1e-6)
-        query = query * scale
-
-        a = tl.load(a_raw + row * stride_a_b + i_hv).to(tl.float32)
-        b = tl.load(b_raw + row * stride_b_b + i_hv).to(tl.float32)
-        al = tl.load(A_log + i_hv).to(tl.float32)
-        bias = tl.load(dt_bias + i_hv).to(tl.float32)
-        z = a + bias
-        softplus = tl.where(z <= SOFTPLUS_THRESHOLD, tl.log(1 + tl.exp(z)), z)
-        decay = -tl.exp(al) * softplus
-        beta = tl.sigmoid(b)
-
-        state_mask = key_mask[:, None] & value_mask[None, :]
-        state_ptr = (
-            ssm_state + ssm_idx * stride_ssm + i_hv * K * V + key_offs[:, None] * V + value_offs[None, :]
-        )
-        state = tl.load(state_ptr, mask=state_mask, other=0.0).to(tl.float32)
-        state *= tl.exp(decay)
-        value -= tl.sum(state * key[:, None], axis=0)
-        value *= beta
-        state += key[:, None] * value[None, :]
-        result = tl.sum(state * query[:, None], axis=0)
-        tl.store(state_ptr, state.to(state_ptr.dtype.element_ty), mask=state_mask)
-        tl.store(
-            output + row * stride_o_b + i_hv * V + value_offs,
-            result.to(output.dtype.element_ty),
-            mask=value_mask,
-        )
-
-
-def fused_gdn_decode_npu(
-    mixed_qkv: torch.Tensor,
-    z_raw: torch.Tensor,
-    a_raw: torch.Tensor,
-    b_raw: torch.Tensor,
-    conv_state: torch.Tensor,
-    conv_weight: torch.Tensor,
-    conv_bias: torch.Tensor,
-    conv_state_indices: torch.Tensor,
-    ssm_states: torch.Tensor,
-    ssm_state_indices: torch.Tensor,
-    A_log: torch.Tensor,
-    dt_bias: torch.Tensor,
-    num_k_heads: int,
-    head_k_dim: int,
-    num_v_heads: int,
-    head_v_dim: int,
-    activation: str = "silu",
-    block_v: int = 8,
-):
-    assert conv_weight.shape[1] == 4, "fused NPU decode currently supports conv width=4"
-    batch = mixed_qkv.shape[0]
-    q_dim = num_k_heads * head_k_dim
-    k_dim = q_dim
-    gva = num_v_heads // num_k_heads
-    scale = head_k_dim**-0.5
-
-    output = torch.empty((batch, 1, num_v_heads, head_v_dim), dtype=mixed_qkv.dtype, device=mixed_qkv.device)
-    block_k = triton.next_power_of_2(head_k_dim)
-    block_v = min(triton.next_power_of_2(head_v_dim), block_v)
-    nv = triton.cdiv(head_v_dim, block_v)
-    blocks = batch * num_v_heads * nv
-    grid = (min(_vector_core_count(), blocks),)
-
-    _fused_gdn_decode_npu_kernel[grid](
-        mixed_qkv,
-        conv_state,
-        conv_weight,
-        conv_bias,
-        conv_state_indices,
-        a_raw,
-        b_raw,
-        A_log,
-        dt_bias,
-        ssm_states,
-        ssm_state_indices,
-        output,
-        scale,
-        H=num_k_heads,
-        HV=num_v_heads,
-        K=head_k_dim,
-        V=head_v_dim,
-        Q_DIM=q_dim,
-        K_DIM=k_dim,
-        BK=block_k,
-        BV=block_v,
-        NV=nv,
-        GVA=gva,
-        stride_m_b=mixed_qkv.stride(0),
-        stride_m_d=mixed_qkv.stride(1),
-        stride_s_b=conv_state.stride(0),
-        stride_s_d=conv_state.stride(1),
-        stride_s_w=conv_state.stride(2),
-        stride_w_d=conv_weight.stride(0),
-        stride_w_w=conv_weight.stride(1),
-        stride_a_b=a_raw.stride(0),
-        stride_b_b=b_raw.stride(0),
-        stride_ssm=ssm_states.stride(0),
-        stride_o_b=output.stride(0),
-        HAS_BIAS=conv_bias is not None,
-        APPLY_SILU=activation in ("silu", "swish"),
-        BLOCKS=blocks,
-        SOFTPLUS_THRESHOLD=20.0,
-        multibuffer=False,
-    )
-    z = z_raw.view(batch, num_v_heads, head_v_dim)
-    return output, z
-
-
-@triton.jit
 def _fused_recurrent_decode_npu_kernel(
     q,
     k,
@@ -552,8 +311,6 @@ def _fused_recurrent_decode_npu_kernel(
     BLOCKS: tl.constexpr,
     SOFTPLUS_THRESHOLD: tl.constexpr,
 ):
-    # Decode T=1: one logical tile is (batch, value-head, V-tile).
-    # Decompose the program-local block id only; do not flatten QKV gathers.
     for block in range(tl.program_id(0), BLOCKS, tl.num_programs(0)):
         value_tile = block % NV
         head_batch = block // NV
@@ -605,35 +362,19 @@ def fused_recurrent_decode_npu(
     dt_bias: torch.Tensor,
     a_raw: torch.Tensor,
     b_raw: torch.Tensor,
-    out: torch.Tensor | None = None,
-    persist: bool = True,
-    block_v: int | None = None,
 ) -> torch.Tensor:
-    """910B decode recurrent with gating still inline. T=1 only.
-
-    q/k: ``[B, 1, H, K]``, v/out: ``[B, 1, HV, V]``, a_raw/b_raw: ``[B, HV]``.
-    NPU decode serving calls this; CUDA keeps the GPU-grid fused recurrent.
-
-    persist=True pins the grid to Vector-core count and loops leftover tiles
-    inside the program. persist=False launches one program per tile.
-    """
     assert q.shape[1] == 1 and k.shape[1] == 1 and v.shape[1] == 1
     assert a_raw.stride(-1) == 1 and b_raw.stride(-1) == 1, "a_raw/b_raw must be feat-contiguous"
     batch, _, key_heads, key_dim = q.shape
     value_heads, value_dim = v.shape[2], v.shape[3]
     assert value_heads % key_heads == 0
-    if out is None:
-        out = _cached_like(v, "rec_out")
+    out = _cached_like(v, "rec_out")
     block_k = triton.next_power_of_2(key_dim)
-    # GPU FLA caps BV at 32. On 910B Vector, a 128x128 fp32 state tile fits
-    # UB (~64KB); larger BV cuts persist-loop trips at B>1.
-    if block_v is None:
-        block_v = min(triton.next_power_of_2(value_dim), 32)
-    else:
-        block_v = min(triton.next_power_of_2(int(block_v)), triton.next_power_of_2(value_dim))
+    # BV stays at 32: a 128x128 fp32 state tile fits 910B UB.
+    block_v = min(triton.next_power_of_2(value_dim), 32)
     value_tiles = triton.cdiv(value_dim, block_v)
     blocks = batch * value_heads * value_tiles
-    grid_n = min(_vector_core_count(), blocks) if persist else blocks
+    grid_n = min(_vector_core_count(), blocks)
     _fused_recurrent_decode_npu_kernel[(grid_n,)](
         q,
         k,

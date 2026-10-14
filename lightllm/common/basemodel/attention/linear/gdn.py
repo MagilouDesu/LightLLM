@@ -181,23 +181,22 @@ class LinearAttPrefillAttState(BasePrefillAttState):
         )
         mixed_qkv = out_tensor.transpose(0, 1)
 
-        # Recurrent processing
         query, key, value = backend._rearrange_mixed_qkv(mixed_qkv)
-        # g and beta have shape (total_tokens, num_heads), need to unsqueeze to get (1, total_tokens, num_heads)
+
         if query.device.type == "npu":
-            from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.fused_recurrent_npu import (
-                fused_recurrent_gated_delta_rule_npu,
+            from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.chunk_prefill_npu import (
+                torch_npu_chunk_prefill,
             )
-            core_attn_out = fused_recurrent_gated_delta_rule_npu(
+
+            core_attn_out = torch_npu_chunk_prefill(
                 q=query,
                 k=key,
                 v=value,
-                g=g.unsqueeze(0),
-                beta=beta.unsqueeze(0),
+                g=g,
+                beta=beta,
                 initial_state=ssm_states,
                 state_indices=self.b_ssm_buffer_idx,
                 cu_seqlens=infer_state.b1_cu_q_seq_len,
-                use_qk_l2norm_in_kernel=True,
             )
         else:
             initial_state = ssm_states[self.b_ssm_buffer_idx]
@@ -383,21 +382,21 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
             backend.head_v_dim,
         )
         if mixed_qkv.device.type == "npu":
-            from lightllm.common.basemodel.triton_kernel.linear_att.gdn_decode_npu import (
-                fused_recurrent_decode_npu,
+            from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.npu_gdn_backend import (
+                npu_gdn_recurrent,
             )
 
-            core_attn_out = fused_recurrent_decode_npu(
+            core_attn_out = npu_gdn_recurrent(
                 q=query,
                 k=key,
                 v=value,
-                initial_state=ssm_states,
-                ssm_state_indices=self.b_ssm_buffer_idx,
+                a=a,
+                b=b,
                 A_log=layer_weight.linear_A_log.weight,
                 dt_bias=layer_weight.linear_dt_bias.weight,
-                a_raw=a,
-                b_raw=b,
-                persist=True,
+                state=ssm_states,
+                read_indices=self.b_ssm_buffer_idx,
+                write_indices=self.b_ssm_buffer_idx,
             )
         else:
             core_attn_out, _ = fused_recurrent_gated_delta_rule(
@@ -498,19 +497,21 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         )
 
         query, key, value = backend._rearrange_mixed_qkv(mixed_qkv, decode=False)
-        core_attn_out, _ = mtp_fused_recurrent_gated_delta_rule(
+        from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.npu_gdn_backend import (
+            npu_gdn_recurrent,
+        )
+
+        return npu_gdn_recurrent(
             q=query,
             k=key,
             v=value,
-            initial_state=ssm_states,
-            final_state=ssm_states,
-            cu_seqlens=self.b1_mtp_cu_q_seq_len,
-            ssm_state_indices=self.b_accepted_ssm_state_indices,
-            ssm_state_write_indices=self.b_ssm_buffer_idx[:, : draft_step + 1],
-            num_accepted_tokens=self.b_num_accepted_tokens,
+            a=a,
+            b=b,
             A_log=layer_weight.linear_A_log.weight,
             dt_bias=layer_weight.linear_dt_bias.weight,
-            a_raw=a,
-            b_raw=b,
+            state=ssm_states,
+            read_indices=self.b_accepted_ssm_state_indices,
+            write_indices=self.b_ssm_buffer_idx[:, : draft_step + 1],
+            cu_seqlens=self.b1_mtp_cu_q_seq_len,
+            num_accepted=self.b_num_accepted_tokens,
         )
-        return core_attn_out
