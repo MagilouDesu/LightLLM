@@ -14,10 +14,10 @@ def can_use_mrope_prefill(q: torch.Tensor, partial_rotary_factor: float) -> bool
 
 @triton.jit
 def _mrope_prefill_kernel(
-    TOKENS: tl.constexpr,
-    BT: tl.constexpr,
     q,
     k,
+    tokens,
+    BT: tl.constexpr,
     Cos,
     Sin,
     mrope_section,
@@ -36,10 +36,10 @@ def _mrope_prefill_kernel(
     HEAD_K: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
 ):
-    for task in range(tl.program_id(0), (HEAD_Q + HEAD_K) * tl.cdiv(TOKENS, BT), 24):
-        head_index = task // tl.cdiv(TOKENS, BT)
-        seq_index = ((task % tl.cdiv(TOKENS, BT)) * BT + tl.arange(0, BT))[:, None]
-        valid = seq_index < TOKENS
+    for task in range(tl.program_id(0), (HEAD_Q + HEAD_K) * tl.cdiv(tokens, BT), 24):
+        head_index = task // tl.cdiv(tokens, BT)
+        seq_index = ((task % tl.cdiv(tokens, BT)) * BT + tl.arange(0, BT))[:, None]
+        valid = seq_index < tokens
 
         dim_range0 = tl.arange(0, BLOCK_DMODEL // 2)[None, :]
         dim_range1 = dim_range0 + BLOCK_DMODEL // 2
@@ -118,10 +118,10 @@ def mrope_prefill(
     rotary_dim = int(q.shape[2] * partial_rotary_factor)
     # Limit the tile area: 256 rotary dimensions at BT64 exceed local UB.
     _mrope_prefill_kernel[(24,)](
-        TOKENS=q.shape[0],
-        BT=min(64, 8192 // rotary_dim),
         q=q,
         k=k,
+        tokens=q.shape[0],
+        BT=min(64, 8192 // rotary_dim),
         Cos=cos,
         Sin=sin,
         mrope_section=mrope_section,
@@ -146,6 +146,7 @@ def mrope_prefill(
 def _mrope_npu_small_kernel(
     q,
     k,
+    tokens,
     Cos,
     Sin,
     mrope_section,
@@ -163,13 +164,12 @@ def _mrope_npu_small_kernel(
     HEAD_Q: tl.constexpr,
     HEAD_K: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
-    TOKENS: tl.constexpr,
 ):
     # Keep logical programs within the physical grid: auto-blockify's tail can
     # otherwise wrap to head zero/token zero and apply the in-place rotation twice.
-    for task in range(tl.program_id(0), (HEAD_Q + HEAD_K) * TOKENS, tl.num_programs(0)):
-        head_index = task // TOKENS
-        seq_index = task % TOKENS
+    for task in range(tl.program_id(0), (HEAD_Q + HEAD_K) * tokens, tl.num_programs(0)):
+        head_index = task // tokens
+        seq_index = task % tokens
 
         dim_range0 = tl.arange(0, BLOCK_DMODEL // 2)
         dim_range1 = dim_range0 + BLOCK_DMODEL // 2
@@ -256,6 +256,7 @@ def mrope_small(
     _mrope_npu_small_kernel[(min((heads_q + heads_k) * tokens, cores),)](
         q,
         k,
+        tokens,
         cos,
         sin,
         mrope_section,
@@ -273,5 +274,4 @@ def mrope_small(
         heads_q,
         heads_k,
         rotary,
-        tokens,
     )
