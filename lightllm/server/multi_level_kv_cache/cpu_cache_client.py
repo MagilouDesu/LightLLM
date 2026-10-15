@@ -3,8 +3,10 @@ from lightllm.utils.envs_utils import get_env_start_args, get_unique_server_name
 from typing import List, Optional, Tuple
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.cpu_cache import CpuCacheCreator, CpuCacheTensorSpec
+from lightllm.common.cpu_cache.rank_local import build_rank_local_pin
 from .shm_objs import ShmDict, ShmLinkedList, _LinkedListItem, IntList
 from lightllm.server.core.objs import AtomicShmLock
+from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
 from lightllm.utils.kv_cache_utils import calcu_cpu_cache_meta
 
 logger = init_logger(__name__)
@@ -20,6 +22,9 @@ class CpuKvCacheClient(object):
         # to do here need calcu from from settings.
         self.kv_cache_tensor_meta = calcu_cpu_cache_meta()
         self.page_num: int = self.kv_cache_tensor_meta.page_num
+
+        # 在沐曦中，每个 rank 只负责自己的连续区间，其他平台是整段共享内存。
+        self.rank_local_layout = False
         self.lock = AtomicShmLock(lock_name=f"{get_unique_server_name()}_cpu_kv_cache_client_lock")
         self._create_cpu_status_list(init_shm_data)
 
@@ -36,6 +41,42 @@ class CpuKvCacheClient(object):
                 dtype=self.kv_cache_tensor_meta.data_type,
                 size_bytes=self.kv_cache_tensor_meta.calcu_size(),
             )
+            # 只有沐曦的 pin rank 才切自己的区间。创建进程和其他平台仍用上面的整段 spec。
+            if not init_shm_data and self.args.hardware_platform == "maca":
+                rank = get_current_rank_in_dp()
+                world_size = get_dp_world_size()
+                local_pin, ret = build_rank_local_pin(
+                    self.kv_cache_tensor_meta,
+                    rank=rank,
+                    world_size=world_size,
+                    enable_disk_cache=self.args.enable_disk_cache,
+                )
+                if local_pin is not None:
+                    tensor_spec = CpuCacheTensorSpec(
+                        shm_key=self.args.cpu_kv_cache_shm_id,
+                        shape=local_pin.shape,
+                        dtype=self.kv_cache_tensor_meta.data_type,
+                        size_bytes=local_pin.size_bytes,
+                        shm_bytes=tensor_spec.size_bytes,
+                        byte_offset=local_pin.byte_offset,
+                    )
+                    self.rank_local_layout = True
+                    logger.info(
+                        "cpu cache rank-local pin: layout=%s rank=%s/%s offset=%s bytes=%s shm_bytes=%s",
+                        local_pin.layout,
+                        rank,
+                        world_size,
+                        local_pin.byte_offset,
+                        local_pin.size_bytes,
+                        tensor_spec.shm_bytes,
+                    )
+                else:
+                    logger.info(
+                        "cpu cache pin full buffer on this rank: world=%s bytes=%s ret=%s",
+                        world_size,
+                        tensor_spec.size_bytes,
+                        ret,
+                    )
             tensor_creator = CpuCacheCreator(tensor_spec=tensor_spec)
             cache = tensor_creator.create_or_attach(
                 init_shm_data=init_shm_data,

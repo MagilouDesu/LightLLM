@@ -540,6 +540,27 @@ def _full_att_with_scale(
     return scale_u64, kv_layer_u64, tail, True
 
 
+def _use_local_linear_page(
+    tensor_page_bytes: int,
+    a: int,
+    b: int,
+    c: int,
+    tp_rank: int,
+    tp_world_size: int,
+) -> tuple[int, int, int, int, int]:
+    # 张量里一页的字节数等于整页，按原来的共享布局写。
+    page_bytes = triton.cdiv(a + b + c, 16) * 16
+    if tensor_page_bytes == page_bytes:
+        return a, b, c, tp_rank, tp_world_size
+
+    # 张量里一页的字节数等于整页除以 tp，这是本 rank 的一截。三段各除以 tp，从这段开头写。
+    if tensor_page_bytes == page_bytes // tp_world_size:
+        return a // tp_world_size, b // tp_world_size, c // tp_world_size, 0, 1
+
+    # 两种都不是，保持原样。
+    return a, b, c, tp_rank, tp_world_size
+
+
 def copy_kv_buffer_to_cpu_cache(
     mem_indexes: torch.Tensor,
     page_indexes: torch.Tensor,
@@ -598,6 +619,14 @@ def copy_kv_buffer_to_cpu_cache(
     a = linear_config.get_cpu_cache_full_att_bytes()
     b = linear_config.get_cpu_cache_conv_bytes()
     c = linear_config.get_cpu_cache_ssm_bytes()
+    a, b, c, tp_rank, tp_world_size = _use_local_linear_page(
+        cpu_cache_tensor.shape[-1],
+        a,
+        b,
+        c,
+        tp_rank,
+        tp_world_size,
+    )
 
     if head_scale_size == 1:
         cpu_cache_full_att = cpu_cache_tensor[:, 0:a].view(cpu_page_num, tp_world_size, -1)
@@ -639,7 +668,6 @@ def copy_kv_buffer_to_cpu_cache(
     assert (tp_rank // head_scale_size) < linear_config.full_att_all_num_kv_heads
 
     if gpu_kv_full_att_state.device.type == "npu":
-        assert not has_scale
         _launch_copy_kv_to_cpu_cache_npu(
             mem_indexes=mem_indexes,
             page_indexes=page_indexes,
@@ -913,6 +941,14 @@ def copy_cpu_cache_to_kv_buffer(
     a = linear_config.get_cpu_cache_full_att_bytes()
     b = linear_config.get_cpu_cache_conv_bytes()
     c = linear_config.get_cpu_cache_ssm_bytes()
+    a, b, c, tp_rank, tp_world_size = _use_local_linear_page(
+        cpu_cache_tensor.shape[-1],
+        a,
+        b,
+        c,
+        tp_rank,
+        tp_world_size,
+    )
 
     if head_scale_size == 1:
         cpu_cache_full_att = cpu_cache_tensor[:, 0:a].view(cpu_page_num, tp_world_size, -1)
