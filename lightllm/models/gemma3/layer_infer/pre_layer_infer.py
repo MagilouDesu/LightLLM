@@ -12,9 +12,33 @@ class Gemma3PreLayerInfer(LlamaMultimodalPreLayerInfer):
             dtype=torch.float32,
             device=torch.device("cuda", torch.cuda.current_device()),
         )
-        self.boi_token_index: int = 255_999
-        self.eoi_token_index: int = 256_000
         return
+
+    def _image_embed_scale_mask(self, input_ids, infer_state):
+        # Text embeddings are scaled by sqrt(hidden). Vision features replace the
+        # image-span rows unscaled. Prompt cache and chunked prefill can drop
+        # <start_of_image> from this chunk, so the span has to come from the
+        # image metadata rather than a scan of the current input ids.
+        weight_mask = torch.empty((input_ids.shape[0],), dtype=torch.float32, device=input_ids.device)
+        weight_mask[:] = self.embed_scale
+        ready_cache_len = infer_state.b_ready_cache_len
+        q_start_loc = infer_state.b_q_start_loc
+        q_seq_len = infer_state.b_q_seq_len
+        for batch_id, params in enumerate(infer_state.multimodal_params):
+            cache_len = int(ready_cache_len[batch_id])
+            flat_start = int(q_start_loc[batch_id])
+            new_len = int(q_seq_len[batch_id])
+            chunk_end = cache_len + new_len
+            for img in params["images"]:
+                image_start = img["start_idx"]
+                image_end = image_start + img["token_num"]
+                overlap_start = max(image_start, cache_len)
+                overlap_end = min(image_end, chunk_end)
+                if overlap_start < overlap_end:
+                    begin = flat_start + overlap_start - cache_len
+                    end = flat_start + overlap_end - cache_len
+                    weight_mask[begin:end] = 1.0
+        return weight_mask
 
     def context_forward(self, input_ids, infer_state, layer_weight):
         img_start_token_ids = []
@@ -23,19 +47,7 @@ class Gemma3PreLayerInfer(LlamaMultimodalPreLayerInfer):
         device = layer_weight.wte_weight_.weight.device
         dtype = layer_weight.wte_weight_.weight.dtype
         hidden_size = layer_weight.wte_weight_.weight.shape[1]
-        weight_mask = torch.zeros((len(input_ids)), dtype=torch.float32, device=device)
-
-        # TODO
-        scale = self.embed_scale
-        for idx, input_id in enumerate(input_ids):
-            if input_id == self.boi_token_index:
-                weight_mask[idx] = scale
-                scale = 1.0
-            elif input_id == self.eoi_token_index:
-                scale = self.embed_scale
-                weight_mask[idx] = scale
-            else:
-                weight_mask[idx] = scale
+        weight_mask = self._image_embed_scale_mask(input_ids, infer_state)
 
         for batch_id, p in enumerate(infer_state.multimodal_params):
             for img in p["images"]:

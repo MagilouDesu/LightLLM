@@ -5,6 +5,7 @@ from lightllm.models.gemma3.layer_weights.transformer_layer_weight import Gemma3
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
+from lightllm.models.gemma4.triton_kernel.context_attention_fwd_gemma4_mm import context_attention_fwd_gemma4_mm
 
 
 class Gemma3TransformerLayerInfer(LlamaTransformerLayerInfer):
@@ -17,7 +18,11 @@ class Gemma3TransformerLayerInfer(LlamaTransformerLayerInfer):
         self.eps_ = 1e-6
         self.head_dim_ = 256
         self.sliding_window_pattern = 6
+        self.sliding_window_ = int(network_config.get("sliding_window", 1024) or 1024)
         return
+
+    def _is_sliding_layer(self):
+        return bool((self.layer_num_ + 1) % self.sliding_window_pattern)
 
     def _get_qkv(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: Gemma3TransformerLayerWeight
@@ -42,8 +47,7 @@ class Gemma3TransformerLayerInfer(LlamaTransformerLayerInfer):
             input=k.float(), eps=self.eps_, alloc_func=self.alloc_tensor
         ).to(cache_kv.dtype)
 
-        is_sliding = bool((self.layer_num_ + 1) % self.sliding_window_pattern)
-        if is_sliding:
+        if self._is_sliding_layer():
             rotary_emb_fwd(
                 q.view(-1, self.tp_q_head_num_, self.head_dim_),
                 cache_kv[:, 0 : self.tp_k_head_num_, :],
@@ -74,6 +78,37 @@ class Gemma3TransformerLayerInfer(LlamaTransformerLayerInfer):
         ffn1_out = None
         ffn2_out = self._tpsp_reduce(input=ffn2_out, infer_state=infer_state)
         return ffn2_out
+
+    def _context_attention_kernel(
+        self, q, kv, infer_state: LlamaInferStateInfo, layer_weight: Gemma3TransformerLayerWeight
+    ) -> torch.Tensor:
+        if not infer_state.has_image_tokens:
+            return super()._context_attention_kernel(q, kv, infer_state, layer_weight)
+
+        # Same-image tokens are bidirectional. Text tokens stay causal.
+        # Sliding layers keep the window; full-attention layers do not.
+        _k, _v = infer_state.mem_manager.get_att_input_params(layer_index=self.layer_num_)
+        _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
+        o_tensor = self.alloc_tensor(_q.shape, q.dtype)
+        if self._is_sliding_layer():
+            sliding_window = (self.sliding_window_ - 1, 0)
+        else:
+            sliding_window = (-1, -1)
+        context_attention_fwd_gemma4_mm(
+            _q,
+            _k,
+            _v,
+            o_tensor,
+            infer_state.b_req_idx,
+            infer_state.b_q_start_loc,
+            infer_state.b_seq_len,
+            infer_state.b_ready_cache_len,
+            infer_state.max_q_seq_len,
+            infer_state.req_manager.req_to_token_indexs,
+            infer_state.b_image_token_end,
+            sliding_window=sliding_window,
+        )
+        return o_tensor.view(q.shape)
 
     def context_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight: Gemma3TransformerLayerWeight):
         input_embdings = input_embdings.to(torch.bfloat16)
