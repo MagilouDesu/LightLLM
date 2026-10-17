@@ -5,7 +5,7 @@ from lightllm.platform.base.attention import register_att_backend
 from lightllm.common.basemodel.triton_kernel.mtp_utils import build_mtp_shared_group_markers
 
 
-@register_att_backend(name="triton", category="standard", platforms=("cuda", "musa", "maca"))
+@register_att_backend(name="triton", category="standard", platforms=("cuda", "musa", "maca", "mlu"))
 class TritonAttBackend(BaseAttBackend):
     def create_att_prefill_state(self, infer_state) -> "TritonPrefillAttState":
         return TritonPrefillAttState(backend=self, infer_state=infer_state)
@@ -177,7 +177,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
             token_decode_attention_flash_decoding,
         )
 
-        out = alloc_func(q.shape, q.dtype)
+        out = alloc_func(q.shape, q.dtype, device=q.device)
 
         token_decode_attention_flash_decoding(
             q=q,
@@ -206,7 +206,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
         else:
             sliding_window = (-1, -1)
 
-        out = alloc_func(q.shape, q.dtype)
+        out = alloc_func(q.shape, q.dtype, device=q.device)
 
         gqa_token_decode_attention_flash_decoding(
             q=q,

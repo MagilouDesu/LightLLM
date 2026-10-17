@@ -126,7 +126,7 @@ def multimodal_emb(
 
 
 @torch.no_grad()
-def npu_multimodal_emb(
+def torch_multimodal_emb(
     out: torch.Tensor,
     prompt_ids: torch.Tensor,
     text_weight_embs: torch.Tensor,
@@ -164,10 +164,10 @@ def npu_multimodal_emb(
             selected = embed_cache[target_indices, 0, :]
         else:
             selected = embed_cache[target_indices]
-        selected_npu = selected.to(out.device, dtype=out.dtype, non_blocking=True)
-        out[image_mask] = selected_npu / tp_world_size
+        selected_dev = selected.to(out.device, dtype=out.dtype, non_blocking=True)
+        out[image_mask] = selected_dev / tp_world_size
 
-    return out 
+    return out
 
 
 @triton.jit

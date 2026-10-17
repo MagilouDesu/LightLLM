@@ -155,6 +155,42 @@ class w8a8MacaQuantizationMethod(w8a8QuantizationMethod):
             cutlass_scaled_mm(out, x_q, qweight, x_scale, weight_scale, bias)
 
 
+@QUANTMETHODS.register(["w8a8-vllm", "w8a8"], platform="mlu")
+class w8a8MluQuantizationMethod(w8a8QuantizationMethod):
+    def apply(
+        self,
+        input_tensor: torch.Tensor,
+        weight_pack: WeightPack,
+        out: Optional[torch.Tensor] = None,
+        workspace: Optional[torch.Tensor] = None,
+        use_custom_tensor_mananger: bool = True,
+        bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        from vllm_mlu import _mlu_ops as mlu_ops
+
+        x = input_tensor.contiguous()
+        m, n = x.shape[0], weight_pack.weight.shape[0]
+        if out is None:
+            if use_custom_tensor_mananger:
+                out = self.cache_manager.alloc_tensor((m, n), x.dtype, device=x.device)
+            else:
+                out = torch.empty((m, n), dtype=x.dtype, device=x.device)
+        x_q, x_scale = mlu_ops.scaled_quantize(x, quant_type=torch.int8, quant_mode="dynamic_per_token")
+        return mlu_ops.smooth_quant_matmul(
+            x_q,
+            x_scale,
+            weight_pack.weight,
+            weight_pack.weight_scale,
+            x.dtype,
+            bias,
+            output=out,
+        )
+
+    @property
+    def method_name(self):
+        return "w8a8-mlu"
+
+
 @QUANTMETHODS.register(["w8a8", "w8a8-ascend"], platform="ascend")
 class w8a8NPUQuantizationMethod(BaseQuantizationMethod):
 

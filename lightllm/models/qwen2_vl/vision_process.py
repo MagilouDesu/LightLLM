@@ -79,7 +79,7 @@ def resize_image(
     return image
 
 
-def _flatten_patches_qwen2vl_npu(
+def _flatten_patches_qwen2vl_8d(
     patches: torch.Tensor,
     batch_size: int,
     grid_t: int,
@@ -91,8 +91,8 @@ def _flatten_patches_qwen2vl_npu(
     patch_size: int,
 ) -> torch.Tensor:
     """
-    Current NPU runtime doesn't support tensors with more than 8 dims. So we need to flatten the patches to 8D.
-    The original code is:
+    NPU/MLU copy ops reject tensors with 8+ dims. Flatten through 8D views
+    instead of the CUDA 10D permute. The original code is:
         patches = (
             patches.view(
                 batch_size,
@@ -322,8 +322,8 @@ class Qwen2VLImageProcessor(BaseImageProcessorFast):
             grid_t = grid_t // self.temporal_patch_size
             grid_h, grid_w = resized_height // self.patch_size, resized_width // self.patch_size
 
-            if self.platform_backend.name == "ascend":
-                flatten_patches = _flatten_patches_qwen2vl_npu(
+            if self.platform_backend.name in ("ascend", "mlu"):
+                flatten_patches = _flatten_patches_qwen2vl_8d(
                     patches=patches,
                     batch_size=batch_size,
                     grid_t=grid_t,

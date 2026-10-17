@@ -17,7 +17,7 @@ def _prefill_block_m(head_dim: int | None = None) -> int:
         if head_dim is not None and head_dim >= 256:
             return 32
         return 64
-    if backend_name != "ascend" and is_tesla():
+    if backend_name not in ("ascend", "mlu") and is_tesla():
         return 64
     return 128
 

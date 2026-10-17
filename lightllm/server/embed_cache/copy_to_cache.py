@@ -85,7 +85,7 @@ def offload_embed_tensor_to_cache(
 
 
 @torch.no_grad()
-def npu_offload_embed_tensor_to_cache(
+def torch_offload_embed_tensor_to_cache(
     embed_tensor: torch.Tensor,
     cache_tensor: torch.Tensor,
     start_index_in_cache: int,

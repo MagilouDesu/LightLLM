@@ -252,3 +252,67 @@ def _musa_ops() -> HostRegisterOps:
             return device_ptr.value
 
     return MusaHostRegisterOps()
+
+
+@register_host_register_worker("mlu")
+def _mlu_ops() -> HostRegisterOps:
+
+    class _CnrtPointerAttributes(ctypes.Structure):
+        _fields_ = [
+            ("type", ctypes.c_int),
+            ("device", ctypes.c_int),
+            ("size", ctypes.c_size_t),
+            ("devicePointer", ctypes.c_void_p),
+            ("hostPointer", ctypes.c_void_p),
+            ("cacheMode", ctypes.c_int),
+            ("deviceBasePointer", ctypes.c_void_p),
+        ]
+
+    class MluHostRegisterOps(HostRegisterOps):
+
+        def __init__(self):
+            import torch_mlu  # noqa: F401
+
+            neuware_home = os.getenv("NEUWARE_HOME", "/usr/local/neuware")
+            cnrt = ctypes.CDLL(os.path.join(neuware_home, "lib64", "libcnrt.so"))
+            cnrt.cnrtHostRegister.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint]
+            cnrt.cnrtHostRegister.restype = ctypes.c_int
+            cnrt.cnrtPointerGetAttributes.argtypes = [
+                ctypes.POINTER(_CnrtPointerAttributes),
+                ctypes.c_void_p,
+            ]
+            cnrt.cnrtPointerGetAttributes.restype = ctypes.c_int
+            self.cnrt = cnrt
+            # CNRT: DeviceMap=0x1, Portable=0x2. MLU590 reports DeviceMap unsupported
+            # (attr 0x315=0); Portable pin works. CUDA's portable bit is the opposite 0x1.
+            self.flag = 0x2
+            self.device_id = get_current_device_id()
+            self._register_supported = True
+            torch.mlu.set_device(self.device_id)
+
+        def register_segment(self, shm_ptr: int, offset: int, seg_len: int) -> None:
+            if not self._register_supported:
+                return
+            torch.mlu.set_device(self.device_id)
+            ptr = ctypes.c_void_p(shm_ptr + offset)
+            r = self.cnrt.cnrtHostRegister(ptr, ctypes.c_size_t(seg_len), self.flag)
+            if r == 100050:
+                self._register_supported = False
+                logger.warning("cnrtHostRegister is not supported, skip pinning cpu cache on mlu")
+                return
+            if r != 0:
+                raise Exception(f"cnrtHostRegister failed with error code {r}, prefer to use hugetlb")
+
+        def get_device_ptr(self, shm_ptr: int) -> int:
+            if not self._register_supported:
+                return shm_ptr
+            attr = _CnrtPointerAttributes()
+            res = self.cnrt.cnrtPointerGetAttributes(ctypes.byref(attr), ctypes.c_void_p(shm_ptr))
+            if res != 0 or not attr.devicePointer:
+                return shm_ptr
+            logger.info(
+                f"cnrtPointerGetAttributes success, host_ptr={shm_ptr}, device_ptr={attr.devicePointer}"
+            )
+            return attr.devicePointer
+
+    return MluHostRegisterOps()

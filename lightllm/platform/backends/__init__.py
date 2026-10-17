@@ -1,9 +1,11 @@
 from lightllm.platform.base.registry import Backend, register_platform
 from lightllm.platform.graph.ascend import AscendGraphBackend
 from lightllm.platform.graph.cuda import CudaGraphBackend
+from lightllm.platform.graph.mlu import MluGraphBackend
 from lightllm.platform.graph.musa import MusaGraphBackend
 from lightllm.platform.runtime.ascend import AscendRuntime
 from lightllm.platform.runtime.cuda import CudaRuntime
+from lightllm.platform.runtime.mlu import MluRuntime
 from lightllm.platform.runtime.musa import MusaRuntime
 
 @register_platform("cuda", ops_fallback=("cuda_like",))
@@ -30,3 +32,10 @@ class MusaBackend(Backend):
 
     def __init__(self) -> None:
         super().__init__(MusaRuntime(), MusaGraphBackend())
+
+
+@register_platform("mlu", ops_fallback=("mlu", "cuda_like"), sampling_fallback=("cuda_like",))
+class MluBackend(Backend):
+
+    def __init__(self) -> None:
+        super().__init__(MluRuntime(), MluGraphBackend())

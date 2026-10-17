@@ -16,7 +16,7 @@ class AttBackendSpec:
     kv_type: str
     # xxxAttBackend
     backend_cls: type
-    # ["cuda", "ascend", "musa", "maca", ...]
+    # ["cuda", "ascend", "musa", "maca", "mlu", ...]
     platforms: tuple[str, ...] | None = None
     # ["triton", "fa3", "flashinfer", "flashmla_spare"]
     validate_name: str | None = None

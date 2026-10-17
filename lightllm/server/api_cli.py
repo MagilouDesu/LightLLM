@@ -891,8 +891,8 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--hardware_platform",
         type=str,
         default="cuda",
-        choices=["cuda", "musa", "ascend", "maca"],
-        help="""Hardware platform: cuda | musa | ascend | maca""",
+        choices=["cuda", "musa", "ascend", "maca", "mlu"],
+        help="""Hardware platform: cuda | musa | ascend | maca | mlu""",
     )
     parser.add_argument(
         "--disable_npu_mm_all_reduce",

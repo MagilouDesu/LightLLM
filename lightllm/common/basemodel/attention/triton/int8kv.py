@@ -8,7 +8,14 @@ from lightllm.platform.base.attention import register_att_backend
 from lightllm.common.basemodel.triton_kernel.diverse_utils import build_diverse_shared_group_markers
 
 
-@register_att_backend(name="triton", category="standard", kv_types=("int8kv",), platforms=("cuda",))
+def _unpack_int8kv_cache(kv):
+    if len(kv) == 3:
+        _, kv_int8, kv_scale = kv
+        return kv_int8, kv_scale
+    return kv
+
+
+@register_att_backend(name="triton", category="standard", kv_types=("int8kv",), platforms=("cuda", "mlu"))
 class Int8kvTritonAttBackend(BaseAttBackend):
     def __init__(self, model):
         super().__init__(model)
@@ -49,8 +56,8 @@ class Int8kvTritonPrefillAttState(BasePrefillAttState):
 
         self.backend: Int8kvTritonAttBackend = self.backend  # for typing
 
-        k, k_scale = k
-        v, v_scale = v
+        k, k_scale = _unpack_int8kv_cache(k)
+        v, v_scale = _unpack_int8kv_cache(v)
         o = self._groupsize_quant_prefill_att(
             q=q,
             k=k,
@@ -149,8 +156,8 @@ class Int8kvTritonDecodeAttState(BaseDecodeAttState):
             and att_control.use_sliding_window is False
             and att_control.use_att_sink is False
         )
-        k, k_scale = k
-        v, v_scale = v
+        k, k_scale = _unpack_int8kv_cache(k)
+        v, v_scale = _unpack_int8kv_cache(v)
         if enable_diverse_mode_gqa_decode_fast_kernel():
             return self.diverse_decode_att(q=q, k=k, k_scale=k_scale, v=v, v_scale=v_scale, alloc_func=alloc_func)
         else:

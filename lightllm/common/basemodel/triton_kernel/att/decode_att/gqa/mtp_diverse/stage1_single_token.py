@@ -210,13 +210,13 @@ def mtp_diverse_stage1_single_token(
     BLOCK_BATCH = triton.next_power_of_2(block_batch)
 
     assert q.dim() == 3 and k.dim() == 3 and v.dim() == 3
-    assert q.is_cuda and k.is_cuda and v.is_cuda
-    assert Req_to_tokens.is_cuda and B_req_idx.is_cuda and b_seq_len.is_cuda and b_mark_shared_group.is_cuda
-    assert mid_out.is_cuda and mid_out_logsumexp.is_cuda
+    # assert q.is_cuda and k.is_cuda and v.is_cuda
+    # assert Req_to_tokens.is_cuda and B_req_idx.is_cuda and b_seq_len.is_cuda and b_mark_shared_group.is_cuda
+    # assert mid_out.is_cuda and mid_out_logsumexp.is_cuda
 
     Lq, Lk = int(q.shape[2]), int(k.shape[2])
     assert Lq == Lk
-    assert Lk in {16, 32, 64, 128}
+    assert Lk in {16, 32, 64, 128, 256}
     batch = int(B_req_idx.shape[0])
     kv_head_num = int(k.shape[1])
     q_head_num = int(q.shape[1])

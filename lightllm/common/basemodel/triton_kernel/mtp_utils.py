@@ -74,7 +74,7 @@ def build_mtp_shared_group_markers(b_req_idx: torch.Tensor, hold_req_id: int) ->
         b_mark_mtp_shared_group: [0, 0, 3, 1,  0,  2,  1,  1]
     """
 
-    assert b_req_idx.is_cuda
+    # assert b_req_idx.is_cuda
     batch_size = b_req_idx.shape[0]
     if batch_size == 0:
         return torch.empty((0,), dtype=torch.int32, device=b_req_idx.device)

@@ -15,7 +15,11 @@ logger = init_logger(__name__)
 
 @lru_cache(maxsize=None)
 def is_tesla():
-    return "Tesla" in torch.cuda.get_device_name(0)
+    try:
+        return "Tesla" in torch.cuda.get_device_name(0)
+    except AssertionError:
+        # On MLU, torch.cuda is not compiled.
+        return False
 
 
 @lru_cache(maxsize=None)
@@ -156,6 +160,9 @@ def has_nvlink():
         return False
     except subprocess.CalledProcessError:
         # If there's an error while executing nvidia-smi, assume no NVLink
+        return False
+    except OSError:
+        # On MLU, nvidia-smi may be a broken stub (empty file / exec format error).
         return False
 
 

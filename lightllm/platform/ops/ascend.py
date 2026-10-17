@@ -2,11 +2,11 @@ import torch
 from typing import Any, Callable, Optional, Tuple
 
 from lightllm.common.basemodel.triton_kernel.embedding import npu_embedding
-from lightllm.common.basemodel.triton_kernel.multimodal_emb import npu_multimodal_emb
+from lightllm.common.basemodel.triton_kernel.multimodal_emb import torch_multimodal_emb
 from lightllm.models.llama.layer_infer.transformer_layer_infer import npu_ffn_fwd
 from lightllm.models.llama.triton_kernel.rotary_emb import npu_rotary_emb_fwd
 from lightllm.platform.base.ops import register_op, out_like
-from lightllm.server.embed_cache.copy_to_cache import npu_offload_embed_tensor_to_cache
+from lightllm.server.embed_cache.copy_to_cache import torch_offload_embed_tensor_to_cache
 
 
 @register_op("ascend")
@@ -23,7 +23,7 @@ def multimodal_emb(
     tp_text_end_token_id: int,
     tp_world_size: int,
 ) -> None:
-    npu_multimodal_emb(
+    torch_multimodal_emb(
         out=out,
         prompt_ids=prompt_ids,
         text_weight_embs=text_weight_embs,
@@ -44,7 +44,7 @@ def offload_embed_tensor_to_cache(
     cache_tensor: torch.Tensor,
     start_index_in_cache: int,
 ) -> None:
-    npu_offload_embed_tensor_to_cache(
+    torch_offload_embed_tensor_to_cache(
         embed_tensor=embed_tensor,
         cache_tensor=cache_tensor,
         start_index_in_cache=start_index_in_cache,
