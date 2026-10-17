@@ -61,10 +61,24 @@ def npu_silu_and_mul_fwd(
     return out
 
 
+def _npu_gate_up(input: torch.Tensor, layer_weight: LlamaTransformerLayerWeight, x_q=None, x_scale=None):
+    if x_q is None:
+        return layer_weight.gate_up_proj.mm(input)
+    return layer_weight.gate_up_proj.quant_method.apply_quantized(
+        x_q,
+        x_scale,
+        layer_weight.gate_up_proj.mm_param,
+        output_dtype=input.dtype,
+        bias=layer_weight.gate_up_proj.bias,
+    )
+
+
 def npu_ffn_fwd(
     input: torch.Tensor,
     layer_weight: LlamaTransformerLayerWeight,
     embed_dim: int,
+    x_q=None,
+    x_scale=None,
 ) -> torch.Tensor:
     import torch.nn.functional as F
 
@@ -72,7 +86,7 @@ def npu_ffn_fwd(
     down_quant_method = layer_weight.down_proj.quant_method
 
     if down_quant_method.method_name == "w8a8-ascend":
-        up_gate_out = layer_weight.gate_up_proj.mm(input)
+        up_gate_out = _npu_gate_up(input, layer_weight, x_q, x_scale)
         if input.shape[0] <= NPU_SWIGLU_QUANT_MAX_TOKENS:
             import torch_npu
 
@@ -145,9 +159,11 @@ def npu_w8a8_ffn_fwd_mm_ar(
     layer_weight: LlamaTransformerLayerWeight,
     embed_dim: int,
     infer_state: LlamaInferStateInfo,
+    x_q=None,
+    x_scale=None,
 ) -> torch.Tensor:
     input = input.view(-1, embed_dim)
-    up_gate_out = layer_weight.gate_up_proj.mm(input)
+    up_gate_out = _npu_gate_up(input, layer_weight, x_q, x_scale)
     ffn1_out = npu_silu_and_mul_fwd(up_gate_out)
     return npu_w8a8_mm_all_reduce(ffn1_out, layer_weight.down_proj, infer_state)
 
@@ -260,9 +276,38 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         o_tensor = self._tpsp_reduce(input=o_tensor, infer_state=infer_state)
         return o_tensor
 
-    def _ffn(self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight) -> torch.Tensor:
+    def _ffn(
+        self,
+        input,
+        infer_state: LlamaInferStateInfo,
+        layer_weight: LlamaTransformerLayerWeight,
+        prequant=None,
+        prequant_scale=None,
+    ) -> torch.Tensor:
         input = input.view(-1, self.embed_dim_)
         input = self._tpsp_allgather(input=input, infer_state=infer_state)
+
+        if prequant is not None:
+            # 融合算子已经把 gate/up 输入的量化做好了，这里直接计算就行了
+            if input.device.type == "npu" and is_npu_w8a8_weight(
+                layer_weight.down_proj
+            ) and can_use_npu_w8a8_mm_all_reduce(input.shape[0], infer_state):
+                return npu_w8a8_ffn_fwd_mm_ar(
+                    input=input,
+                    layer_weight=layer_weight,
+                    embed_dim=self.embed_dim_,
+                    infer_state=infer_state,
+                    x_q=prequant,
+                    x_scale=prequant_scale,
+                )
+            ffn2_out = npu_ffn_fwd(
+                input,
+                layer_weight,
+                self.embed_dim_,
+                x_q=prequant,
+                x_scale=prequant_scale,
+            )
+            return self._tpsp_reduce(input=ffn2_out, infer_state=infer_state)
 
         if input.device.type == "npu" and is_plain_mm_weight(
             layer_weight.down_proj

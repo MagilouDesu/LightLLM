@@ -63,6 +63,41 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             self._ffn = partial(LlamaTransformerLayerInfer._ffn, self)
         return
 
+    def _fused_ffn_residual(self, input_embdings, attn_out, infer_state, layer_weight):
+        # https://www.hiascend.com/document/detail/zh/Pytorch/latest/apiref/customapi/docs/zh/custom_APIs/torch_npu/torch_npu-npu_add_rms_norm_dynamic_quant.md
+        if self.is_moe or attn_out.device.type != "npu":
+            return None
+
+        if get_env_start_args().enable_tpsp_mix_mode:
+            return None
+
+        if not is_npu_w8a8_weight(layer_weight.gate_up_proj) or not is_npu_w8a8_weight(layer_weight.down_proj):
+            return None
+
+        import torch_npu
+
+        residual = input_embdings.view(-1, self.embed_dim_).contiguous()
+        delta = attn_out.view(-1, self.embed_dim_).contiguous()
+        gamma = layer_weight.ffn_norm_weight_.weight
+        if gamma.dtype != residual.dtype:
+            gamma = gamma.to(dtype=residual.dtype)
+        quant, _, summed, scale, _ = torch_npu.npu_add_rms_norm_dynamic_quant(
+            residual,
+            delta,
+            gamma,
+            epsilon=self.eps_,
+            output_mask=[True, False],
+        )
+        ffn_out = self._ffn(
+            summed,
+            infer_state,
+            layer_weight,
+            prequant=quant,
+            prequant_scale=scale.reshape(-1),
+        )
+        summed.add_(ffn_out.view(-1, self.embed_dim_))
+        return summed
+
     def _ffn_tp_impl(
         self, input: torch.Tensor, infer_state: Qwen3NextInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight
     ) -> torch.Tensor:
