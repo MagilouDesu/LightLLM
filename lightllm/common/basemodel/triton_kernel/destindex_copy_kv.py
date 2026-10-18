@@ -36,6 +36,14 @@ def _fwd_kernel_destindex_copy_kv(
 
 @torch.no_grad()
 def destindex_copy_kv(K, DestLoc, Out):
+    if K.device.type == "mlu":
+        import torch_mlu_ops as tmo
+
+        slots, heads, dim = Out.shape
+        index = DestLoc if DestLoc.dtype == torch.int32 else DestLoc.to(dtype=torch.int32)
+        tmo.reshape_paged_cache(K, None, Out.view(slots, heads, 1, dim), None, index, False)
+        return
+
     seq_len = DestLoc.shape[0]
     head_num = K.shape[1]
     head_dim = K.shape[2]
