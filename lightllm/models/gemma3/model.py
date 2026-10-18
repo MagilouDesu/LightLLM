@@ -25,7 +25,7 @@ logger = init_logger(__name__)
 class Gemma3Tokenizer(BaseMultiModalTokenizer):
     def __init__(self, tokenizer, model_cfg):
         super().__init__(tokenizer)
-        self.image_token = model_cfg.get("image_token", "<start_of_image>")
+        self.image_token = model_cfg.get("image_token", "<image_soft_token>")
         self.boi_token = "<start_of_image>"
         self.eoi_token = "<end_of_image>"
         self.boi_token_index: int = model_cfg.get("boi_token_index", 255_999)
@@ -56,24 +56,31 @@ class Gemma3Tokenizer(BaseMultiModalTokenizer):
         if multimodal_params is None:
             return self.tokenizer(prompt).input_ids
 
-        ids_chunks = [self.tokenizer(x).input_ids for x in prompt.split(self.boi_token)]
-        input_ids = ids_chunks[0]
+        expanded = "\n\n" + self.boi_token + (self.image_token * self.mm_tokens_per_image) + self.eoi_token + "\n\n"
+        input_ids = list(self.tokenizer(prompt.replace(self.boi_token, expanded)).input_ids)
+
+        out = []
         image_id = 0
-
-        for ids in ids_chunks[1:]:
+        index = 0
+        while index < len(input_ids):
+            if input_ids[index] != self.image_token_index:
+                out.append(input_ids[index])
+                index += 1
+                continue
             token_id = multimodal_params.images[image_id].token_id
-            token_num = multimodal_params.images[image_id].token_num
-            assert token_num == self.image_length, "invalid token num: {} vs {}!".format(token_num, self.image_length)
-
-            input_ids.append(self.boi_token_index)
-            input_ids.extend(range(token_id, token_id + self.mm_tokens_per_image))
-            input_ids.append(self.eoi_token_index)
-            input_ids.extend(ids)
+            end = index
+            while end < len(input_ids) and input_ids[end] == self.image_token_index:
+                end += 1
+            assert end - index == self.mm_tokens_per_image, "invalid image token num: {} vs {}!".format(
+                end - index, self.mm_tokens_per_image
+            )
+            multimodal_params.images[image_id].start_idx = len(out)
+            out.extend(range(token_id, token_id + self.mm_tokens_per_image))
             image_id += 1
-        if multimodal_params:
-            image_cnt = len(multimodal_params.images)
-            assert image_cnt == image_id, "invalid image tag num: {} vs {}!".format(image_cnt, image_id)
-        return input_ids
+            index = end
+        image_cnt = len(multimodal_params.images)
+        assert image_cnt == image_id, "invalid image tag num: {} vs {}!".format(image_cnt, image_id)
+        return out
 
 
 @ModelRegistry("gemma3")
@@ -98,12 +105,20 @@ class Gemma3TpPartModel(LlamaTpPartModel):
             return int(self.config["head_dim"])
         return int(self.config["n_embed"] // self.config["num_attention_heads"])
 
+    def _global_rope_scaling_factor(self):
+        for key in ("rope_parameters", "rope_scaling"):
+            rope_scaling = self.config.get(key) or {}
+            factor = rope_scaling.get("factor")
+            if factor is None:
+                factor = (rope_scaling.get("full_attention") or {}).get("factor")
+            if factor is not None:
+                return float(factor)
+        return 1.0
+
     def _init_to_get_rotary(self, default_base=10000.0):
         partial_head_dim = int(self.config.get("partial_rotary_factor", 1) * self.head_dim_)
-        if self.config.get("rope_scaling", {}) is None:
-            rope_scaling_factor = 1.0
-        else:
-            rope_scaling_factor = self.config.get("rope_scaling", {}).get("factor", 1.0)
+        rope_scaling_factor = self._global_rope_scaling_factor()
+        logger.info("gemma3 global rope scaling factor %s", rope_scaling_factor)
 
         if "max_sequence_length" in self.config:
             max_seq_len = self.config["max_sequence_length"]
