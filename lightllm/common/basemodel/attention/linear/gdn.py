@@ -199,6 +199,20 @@ class LinearAttPrefillAttState(BasePrefillAttState):
                 cu_seqlens=infer_state.b1_cu_q_seq_len,
                 use_qk_l2norm_in_kernel=True,
             )
+        elif query.device.type == "mlu":
+            from .mlu_gdn import mlu_chunk_gated_delta_rule
+
+            initial_state = ssm_states[self.b_ssm_buffer_idx]
+            core_attn_out, last_recurrent_state = mlu_chunk_gated_delta_rule(
+                q=query,
+                k=key,
+                v=value,
+                g=g.unsqueeze(0),
+                beta=beta.unsqueeze(0),
+                initial_state=initial_state,
+                cu_seqlens=infer_state.b1_cu_q_seq_len,
+            )
+            ssm_states[self.b_ssm_buffer_idx] = last_recurrent_state.to(ssm_states.dtype, copy=False)
         else:
             initial_state = ssm_states[self.b_ssm_buffer_idx]
             core_attn_out, last_recurrent_state = backend.prefill_kernel(
