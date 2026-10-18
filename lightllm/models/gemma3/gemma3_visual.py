@@ -139,8 +139,6 @@ class Gemma3VisionModel(VisualDeviceMixin):
     def encode(self, images: List[ImageItem]):
         img_tensors = []
         uuids = []
-        valid_id = 0
-        valid_ids = []
 
         for i, img in enumerate(images):
             if isinstance(img, ImageItem):
@@ -152,15 +150,11 @@ class Gemma3VisionModel(VisualDeviceMixin):
             else:
                 raise Exception("Unsupported input types: {} for {}".format(type(img), img))
 
-            cur_num = img_tensors[-1].shape[0] * self.mm_tokens_per_image
-            valid_ids.append([valid_id, valid_id + cur_num])
-            valid_id += cur_num
-
         if len(img_tensors) <= 0:
             return None
 
-        img = torch.cat(img_tensors, dim=0)
-        all_img_embeds = self.forward(img)
-        all_img_embeds = all_img_embeds.reshape(-1, all_img_embeds.shape[-1])
-
-        return all_img_embeds, uuids, valid_ids
+        image_embeds = self.forward(torch.cat(img_tensors, dim=0))
+        num_images, tokens_per_image, hidden_size = image_embeds.shape
+        image_embeds = image_embeds.reshape(num_images * tokens_per_image, hidden_size)
+        valid_ids = [[i * tokens_per_image, (i + 1) * tokens_per_image] for i in range(num_images)]
+        return image_embeds, uuids, valid_ids
