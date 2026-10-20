@@ -356,8 +356,14 @@ def causal_conv1d_update(
     batch = conv_state_indices.size(0)  # number of requests
     dim = x.size(1)
     _, width = weight.shape
-    # conv_state: (num_slots, dim, state_len) with state_len == width - 1 + mtp_step
-    _, _, state_len = conv_state.size()
+    # conv_state is (num_slots, dim, state_len) or, on MLU, (num_slots, state_len, dim).
+    feat_last = conv_state.size(-1) == dim
+    if feat_last:
+        state_len = conv_state.size(1)
+        stride_istate_seq, stride_istate_token, stride_istate_dim = conv_state.stride()
+    else:
+        state_len = conv_state.size(-1)
+        stride_istate_seq, stride_istate_dim, stride_istate_token = conv_state.stride()
 
     assert state_len == width - 1 + mtp_step
 
@@ -369,7 +375,6 @@ def causal_conv1d_update(
     stride_x_token, stride_x_dim = x.stride()
     stride_o_token, stride_o_dim = out.stride()
 
-    stride_istate_seq, stride_istate_dim, stride_istate_token = conv_state.stride()
     stride_state_indices = conv_state_indices.stride(0)
 
     np2_statelen = triton.next_power_of_2(state_len)

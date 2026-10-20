@@ -98,6 +98,23 @@ def _conv_pack_gdn_decode_kernel(
     tl.store(b_out + row * gate_dim + offs, b_vals, mask=gate_mask)
 
 
+# Weight is [channel, kernel] and shared by every request. Cache the [kernel, channel]
+# transpose so the decode kernel can vector-load a channel tile. Hold the source tensor:
+# a data_ptr alone is reused after the allocator frees it.
+_CONV_WEIGHT_CHANNEL_LAST = {}
+
+
+def _channel_last_conv_weight(conv_weight: torch.Tensor) -> torch.Tensor:
+    key = conv_weight.data_ptr()
+    cached = _CONV_WEIGHT_CHANNEL_LAST.get(key)
+    version = conv_weight._version
+    if cached is None or cached[0] is not conv_weight or cached[1] != version:
+        flipped = conv_weight.transpose(0, 1).contiguous()
+        _CONV_WEIGHT_CHANNEL_LAST[key] = (conv_weight, version, flipped)
+        return flipped
+    return cached[2]
+
+
 def _conv_pack_gdn_decode_inputs_pytorch(
     mixed_qkv: torch.Tensor,
     z_raw: torch.Tensor,
@@ -160,19 +177,15 @@ def conv_pack_gdn_decode_inputs(
     assert conv_size >= 2, f"conv kernel size must be at least 2, got {conv_size}"
     assert mixed_qkv.shape[1] == conv_dim, f"mixed_qkv shape mismatch: {mixed_qkv.shape[1]} != {conv_dim}"
     feat_last = conv_state.shape[-1] == conv_dim
+    kernel_major_weight = conv_weight.shape[0] == conv_size and conv_weight.shape[1] == conv_dim
+    if not (feat_last and kernel_major_weight):
+        assert conv_weight.shape[0] == conv_dim, f"conv_weight shape mismatch: {conv_weight.shape[0]} != {conv_dim}"
+        assert conv_weight.shape[1] == conv_size, f"conv_weight kernel mismatch: {conv_weight.shape[1]} != {conv_size}"
     if feat_last:
         assert conv_state.shape[1] >= conv_size - 1, (
             f"feat-last conv_state window too short: {conv_state.shape} conv_size={conv_size}"
         )
-        if conv_weight.shape[0] == conv_size and conv_weight.shape[1] == conv_dim:
-            conv_weight_t = conv_weight
-        else:
-            assert conv_weight.shape[0] == conv_dim, f"conv_weight shape mismatch: {conv_weight.shape[0]} != {conv_dim}"
-            assert conv_weight.shape[1] == conv_size, f"conv_weight kernel mismatch: {conv_weight.shape[1]} != {conv_size}"
-            conv_weight_t = conv_weight.transpose(0, 1).contiguous()
     else:
-        assert conv_weight.shape[0] == conv_dim, f"conv_weight shape mismatch: {conv_weight.shape[0]} != {conv_dim}"
-        assert conv_weight.shape[1] == conv_size, f"conv_weight kernel mismatch: {conv_weight.shape[1]} != {conv_size}"
         assert conv_state.shape[1] == conv_dim, f"conv_state shape mismatch: {conv_state.shape[1]} != {conv_dim}"
         assert (
             conv_state.shape[2] >= conv_size - 1
@@ -180,13 +193,14 @@ def conv_pack_gdn_decode_inputs(
 
     if mixed_qkv.device.type == "npu":
         if feat_last:
+            npu_weight = conv_weight if kernel_major_weight else conv_weight.transpose(0, 1).contiguous()
             return conv_pack_gdn_decode_inputs_npu_contig(
                 mixed_qkv,
                 z_raw,
                 a_raw,
                 b_raw,
                 conv_state,
-                conv_weight_t,
+                npu_weight,
                 conv_bias,
                 conv_state_indices,
                 activation,
@@ -220,6 +234,56 @@ def conv_pack_gdn_decode_inputs(
     z = torch.empty((batch, num_v_heads, head_v_dim), dtype=z_raw.dtype, device=z_raw.device)
     a = torch.empty((batch, gate_dim), dtype=a_raw.dtype, device=a_raw.device)
     b = torch.empty((batch, gate_dim), dtype=b_raw.dtype, device=b_raw.device)
+
+    has_bias = conv_bias is not None
+    apply_silu = activation in ["silu", "swish"]
+    # MLU state is [slot, window, channel]. One core owns a 1024-wide channel tile;
+    # four warps on a 256-wide tile oversubscribe it.
+    if feat_last and mixed_qkv.device.type == "mlu":
+        block_size = 1024
+        grid = (batch, triton.cdiv(conv_dim, block_size))
+        weight_fl = conv_weight if kernel_major_weight else _channel_last_conv_weight(conv_weight)
+        _conv_pack_gdn_decode_kernel[grid](
+            mixed_qkv,
+            z_raw,
+            a_raw,
+            b_raw,
+            conv_state,
+            weight_fl,
+            conv_bias,
+            conv_state_indices,
+            q,
+            k,
+            v,
+            z,
+            a,
+            b,
+            mixed_qkv.stride(0),
+            mixed_qkv.stride(1),
+            z_raw.stride(0),
+            z_raw.stride(1),
+            z_raw.stride(2),
+            a_raw.stride(0),
+            a_raw.stride(1),
+            b_raw.stride(0),
+            b_raw.stride(1),
+            conv_state.stride(0),
+            conv_state.stride(2),
+            conv_state.stride(1),
+            weight_fl.stride(1),
+            weight_fl.stride(0),
+            q_dim,
+            k_dim,
+            v_dim,
+            gate_dim,
+            conv_dim,
+            conv_size,
+            HAS_BIAS=has_bias,
+            APPLY_SILU=apply_silu,
+            BLOCK_SIZE=block_size,
+            num_warps=1,
+        )
+        return q, k, v, z, a, b
 
     block_size = 256
     grid = (batch, triton.cdiv(conv_dim, block_size))
@@ -258,8 +322,8 @@ def conv_pack_gdn_decode_inputs(
         gate_dim,
         conv_dim,
         conv_size,
-        HAS_BIAS=conv_bias is not None,
-        APPLY_SILU=activation in ["silu", "swish"],
+        HAS_BIAS=has_bias,
+        APPLY_SILU=apply_silu,
         BLOCK_SIZE=block_size,
         num_warps=8,
     )

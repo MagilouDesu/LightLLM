@@ -298,6 +298,13 @@ class Qwen3NextLinearAttPageHelper:
             self._read_one_rank(mem, tp_index, req_idx, conv_page, ssm_page)
         return
 
+    def _select_conv_state(self, mem: "Qwen3NextMemManager", conv_req_idx: int) -> torch.Tensor:
+        slot = mem.req_to_conv_state.buffer[:, conv_req_idx]
+        window = self.conv_shape[-1]
+        if mem.linear_config.conv_state_feat_last():
+            return slot[:, :window, :].transpose(1, 2)
+        return slot[..., :window]
+
     def _get_req_state_indexes(self, req_idx: int):
         mtp_size = get_env_start_args().mtp_step + 1
         # Conv is one widened slot per request; SSM keeps the historical S+1 block layout.
@@ -312,7 +319,7 @@ class Qwen3NextLinearAttPageHelper:
         ssm_page: torch.Tensor,
     ):
         conv_req_idx, ssm_req_idx = self._get_req_state_indexes(req_idx)
-        conv_state = mem.req_to_conv_state.buffer[:, conv_req_idx, ..., : self.conv_shape[-1]]
+        conv_state = self._select_conv_state(mem, conv_req_idx)
         ssm_state = mem.req_to_ssm_state.buffer[:, ssm_req_idx, ...]
         self._copy_conv_state_to_page(conv_state, conv_page, mem, tp_index)
         self._copy_ssm_state_to_page(ssm_state, ssm_page, mem, tp_index)
@@ -492,7 +499,7 @@ class Qwen3NextLinearAttPageHelper:
         ssm_page: torch.Tensor,
     ):
         conv_req_idx, ssm_req_idx = self._get_req_state_indexes(req_idx)
-        conv_state = mem.req_to_conv_state.buffer[:, conv_req_idx, ..., : self.conv_shape[-1]]
+        conv_state = self._select_conv_state(mem, conv_req_idx)
         ssm_state = mem.req_to_ssm_state.buffer[:, ssm_req_idx, ...]
         self._copy_page_to_conv_state(conv_page, conv_state, mem, tp_index)
         self._copy_page_to_ssm_state(ssm_page, ssm_state, mem, tp_index)

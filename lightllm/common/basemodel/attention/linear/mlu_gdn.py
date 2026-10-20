@@ -19,7 +19,11 @@ def mlu_chunk_gated_delta_rule(
         repeat = v.shape[2] // q_norm.shape[2]
         q_norm = q_norm.repeat_interleave(repeat, dim=2).contiguous()
         k_norm = k_norm.repeat_interleave(repeat, dim=2).contiguous()
-    if cu_seqlens.dtype != torch.int32:
+    # Prefill packs q as [1, T, ...]. One sequence is cu_seqlens == [0, T];
+    # the varlen index path covers that same range and is slower.
+    if cu_seqlens.numel() == 2:
+        cu_seqlens = None
+    elif cu_seqlens.dtype != torch.int32:
         cu_seqlens = cu_seqlens.to(dtype=torch.int32)
     return triton_ops.chunk_gated_delta_rule(
         q=q_norm,

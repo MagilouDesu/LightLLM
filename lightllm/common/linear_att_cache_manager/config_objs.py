@@ -50,12 +50,14 @@ class LinearAttCacheConfig:
     def get_full_att_kv_layer_num_with_draft_model(self):
         return self.get_main_model_full_att_layer_num() + self.draft_full_att_kv_layer_num
 
-    def conv_state_feat_last(self) -> bool:
-        # Ascend Vector loads want the channel axis contiguous (SGL-style).
+    def _hardware_platform(self) -> str:
         try:
-            return get_env_start_args().hardware_platform == "ascend"
+            return get_env_start_args().hardware_platform
         except Exception:
-            return False
+            return ""
+
+    def conv_state_feat_last(self) -> bool:
+        return self._hardware_platform() in ("ascend", "mlu")
 
     def get_full_att_kv_layer_index(self, layer_index: int) -> int:
         """Map a global target/draft layer index to the packed full-attention cache."""

@@ -213,6 +213,131 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
             p_beta += HV * (V if IS_BETA_HEADWISE else 1)
 
 
+@triton.jit
+def _mlu_decode_recurrent_kernel(
+    q,
+    k,
+    v,
+    o,
+    h,
+    indices,
+    A_log,
+    dt_bias,
+    a_raw,
+    b_raw,
+    scale,
+    H: tl.constexpr,
+    HV: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BK: tl.constexpr,
+    BV: tl.constexpr,
+    stride_q: tl.constexpr,
+    stride_k: tl.constexpr,
+    stride_v: tl.constexpr,
+    stride_a: tl.constexpr,
+    stride_b: tl.constexpr,
+    stride_state: tl.constexpr,
+    stride_indices: tl.constexpr,
+):
+    i_v = tl.program_id(0)
+    i_nh = tl.program_id(1)
+    i_n = i_nh // HV
+    i_hv = i_nh % HV
+    i_h = i_hv // (HV // H)
+    o_k = tl.arange(0, BK)
+    o_v = i_v * BV + tl.arange(0, BV)
+    mask_k = o_k < K
+    mask_v = o_v < V
+    mask_h = mask_v[:, None] & mask_k[None, :]
+
+    b_q = tl.load(q + i_n * stride_q + i_h * K + o_k, mask=mask_k, other=0).to(tl.float32)
+    b_k = tl.load(k + i_n * stride_k + i_h * K + o_k, mask=mask_k, other=0).to(tl.float32)
+    b_v = tl.load(v + i_n * stride_v + i_hv * V + o_v, mask=mask_v, other=0).to(tl.float32)
+    b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
+    b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
+    b_q = b_q * scale
+
+    slot = tl.load(indices + i_n * stride_indices).to(tl.int64)
+    # [K, V] memory gathered into a [BV, BK] tile. K is strided by V.
+    offs = o_k[None, :] * V + o_v[:, None]
+    p_h = h + slot * stride_state + i_hv * K * V + offs
+    b_h = tl.load(p_h, mask=mask_h, other=0).to(tl.float32)
+
+    b_A = tl.load(A_log + i_hv).to(tl.float32)
+    b_dt = tl.load(dt_bias + i_hv).to(tl.float32)
+    x = tl.load(a_raw + i_n * stride_a + i_hv).to(tl.float32) + b_dt
+    soft = tl.where(x <= 20.0, tl.log(1.0 + tl.exp(x)), x)
+    b_h *= exp(-tl.exp(b_A) * soft)
+    b_beta = tl.sigmoid(tl.load(b_raw + i_n * stride_b + i_hv).to(tl.float32))
+    b_v = b_beta * (b_v - tl.sum(b_h * b_k[None, :], 1))
+    b_h += b_v[:, None] * b_k[None, :]
+    b_o = tl.sum(b_h * b_q[None, :], 1)
+    tl.store(o + (i_n * HV + i_hv) * V + o_v, b_o.to(o.dtype.element_ty), mask=mask_v)
+    tl.store(p_h, b_h.to(h.dtype.element_ty), mask=mask_h)
+
+
+def _mlu_decode_recurrent(
+    q,
+    k,
+    v,
+    A_log,
+    dt_bias,
+    a_raw,
+    b_raw,
+    scale,
+    state,
+    indices,
+    stride_q,
+    stride_k,
+    stride_v,
+    stride_a,
+    stride_b,
+    B,
+    H,
+    HV,
+    K,
+    V,
+):
+    BK = triton.next_power_of_2(K)
+    # One program owns 64 V columns. BV=8 launches 16 times as many programs and
+    # reloads q/k for each of them; 64 is the point where a wider tile stops helping.
+    BV = min(64, triton.next_power_of_2(V))
+    NV = triton.cdiv(V, BV)
+    # [1, B, 1, HV, V] has the same packed layout as [B, HV, V] after dropping the unit dims.
+    o = q.new_empty(1, B, 1, HV, V)
+    stride_indices = indices.stride(0)
+    _mlu_decode_recurrent_kernel[(NV, B * HV)](
+        q,
+        k,
+        v,
+        o,
+        state,
+        indices,
+        A_log,
+        dt_bias,
+        a_raw,
+        b_raw,
+        scale,
+        H,
+        HV,
+        K,
+        V,
+        BK,
+        BV,
+        stride_q,
+        stride_k,
+        stride_v,
+        stride_a,
+        stride_b,
+        state.stride(0),
+        stride_indices,
+        num_warps=1,
+        num_stages=1,
+    )
+    return o.squeeze(0), state
+
+
 def _ensure_qkv_token_strided(x: torch.Tensor, inner_numel: int):
     """Return q/k/v and per-token stride, copying only when needed.
 
@@ -279,22 +404,54 @@ def fused_recurrent_gated_delta_rule_fwd(
     v, stride_v_tok = _ensure_qkv_token_strided(v, HV * V)
     a_raw, stride_a_tok = _ensure_gate_token_strided(a_raw, HV)
     b_raw, stride_b_tok = _ensure_gate_token_strided(b_raw, HV)
+    # Qwen3Next decode on MLU always arrives here: T=1, fused gating, inplace state.
+    if (
+        q.device.type == "mlu"
+        and T == 1
+        and cu_seqlens is None
+        and num_accepted_tokens is None
+        and ssm_state_write_indices is None
+        and A_log is not None
+        and use_qk_l2norm_in_kernel
+        and inplace_final_state
+        and ssm_state_indices is not None
+        and out is None
+    ):
+        return _mlu_decode_recurrent(
+            q,
+            k,
+            v,
+            A_log,
+            dt_bias,
+            a_raw,
+            b_raw,
+            scale,
+            initial_state,
+            ssm_state_indices,
+            stride_q_tok,
+            stride_k_tok,
+            stride_v_tok,
+            stride_a_tok,
+            stride_b_tok,
+            B,
+            H,
+            HV,
+            K,
+            V,
+        )
+
     BK = triton.next_power_of_2(K)
-    if T == 1:
-        # Decode path: use larger BV to reduce kernel instances (4 blocks instead of 16)
-        # and more warps for better SM utilization at T=1 where there's no pipelining benefit
+    if T == 1 and q.device.type != "mlu":
+        # CUDA decode: larger BV cuts the grid, and extra warps help at T=1.
         BV = min(triton.next_power_of_2(V), 32)
         num_warps = 4
         num_stages = 1
     else:
-        # Prefill path: small BV for better pipelining across sequence length
+        # General kernel, including MLU calls that miss the dedicated decode path.
         BV = min(triton.next_power_of_2(V), 8)
         num_warps = 1
-        num_stages = 3
+        num_stages = 1 if T == 1 else 3
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
-    assert NK == 1, "NK > 1 is not supported yet"
-
-    fuse_gating = A_log is not None
 
     if out is not None:
         o = out.unsqueeze(0) if out.ndim == v.ndim else out
