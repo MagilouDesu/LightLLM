@@ -5,6 +5,7 @@ import torch_mlu_ops as tmo
 
 from lightllm.common.basemodel.triton_kernel.multimodal_emb import torch_multimodal_emb
 from lightllm.common.basemodel.triton_kernel.norm.gated_rmsnorm_mlu import mlu_gated_rmsnorm_forward
+from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 from lightllm.platform.base.ops import register_op, out_like
 from lightllm.server.embed_cache.copy_to_cache import torch_offload_embed_tensor_to_cache
 
@@ -60,11 +61,20 @@ def rms_norm(
     out: torch.Tensor,
     gate_value: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    if gate_value is None:
-        # vLLM RMSNorm.forward_oot. Gated norm has no vendor kernel.
+    if gate_value is not None:
+        mlu_gated_rmsnorm_forward(x=input, weight=weight, bias=None, eps=eps, z=gate_value, out=out)
+    elif input.dtype == weight.dtype:
         tmo.fused_rms_norm(input, None, weight, None, None, eps, False, None, out)
     else:
-        mlu_gated_rmsnorm_forward(x=input, weight=weight, bias=None, eps=eps, z=gate_value, out=out)
+        x_rows = input.view(-1, input.shape[-1])
+        y_rows = out.view(-1, input.shape[-1])
+        limit = 65535 // 8
+        if x_rows.shape[0] <= limit:
+            rmsnorm_forward(x=input, weight=weight, eps=eps, out=out)
+        else:
+            for start in range(0, x_rows.shape[0], limit):
+                end = min(start + limit, x_rows.shape[0])
+                rmsnorm_forward(x=x_rows[start:end], weight=weight, eps=eps, out=y_rows[start:end])
     return out
 
 
