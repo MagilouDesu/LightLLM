@@ -4,6 +4,29 @@ import triton
 import triton.language as tl
 import os
 
+from lightllm.common.triton_utils.autotuner import autotune
+
+
+def _qk_fused_configs():
+    return [{"num_warps": w} for w in (1, 2, 4, 8)]
+
+
+def _qk_fused_static(q, k, w_q, w_k, eps=1e-6, fp32_multiply=False):
+    head_dim = int(w_q.shape[0])
+    n_q = int(q.reshape(-1, q.shape[-1]).shape[1] // head_dim)
+    n_k = int(k.reshape(-1, k.shape[-1]).shape[1] // head_dim)
+    return {
+        "HEAD_DIM": head_dim,
+        "N_Q": n_q,
+        "N_K": n_k,
+        "FP32": bool(fp32_multiply),
+        "dtype": str(q.dtype),
+    }
+
+
+def _qk_fused_run(q, k, w_q, w_k, eps=1e-6, fp32_multiply=False):
+    return int(q.reshape(-1, q.shape[-1]).shape[0])
+
 
 @triton.jit
 def _rms_norm_fwd_fused(
@@ -148,6 +171,13 @@ def _qk_rms_norm_fused_kernel(
         tl.store(K_ptr + k_ptr_offset, y)
 
 
+@autotune(
+    kernel_name="qk_rmsnorm_fused_forward:v1",
+    configs_gen_func=_qk_fused_configs,
+    static_key_func=_qk_fused_static,
+    run_key_func=_qk_fused_run,
+    mutates_args=["q", "k"],
+)
 def qk_rmsnorm_fused_forward(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -155,6 +185,7 @@ def qk_rmsnorm_fused_forward(
     w_k: torch.Tensor,
     eps: float = 1e-6,
     fp32_multiply: bool = False,
+    run_config=None,
 ):
     """
     In-place RMSNorm for both Q and K in a single kernel launch.
@@ -211,7 +242,7 @@ def qk_rmsnorm_fused_forward(
         eps=eps,
         FP32_MULTIPLY=fp32_multiply,
         BLOCK_SIZE=BLOCK_SIZE,
-        num_warps=4,
+        num_warps=4 if run_config is None else int(run_config["num_warps"]),
     )
 
     return q, k

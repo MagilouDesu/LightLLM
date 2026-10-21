@@ -135,6 +135,41 @@ def _l2norm_fwd_kernel_wrapper(x, y, eps, T, D, BD, NB, run_config=None):
     l2norm_fwd_kernel[grid](x, y, eps, NB=NB, T=T, D=D, BT=BT, BD=BD, num_warps=num_warps)
 
 
+def _get_l2norm_kernel2_configs():
+    return [{"num_warps": w} for w in (1, 2, 4, 8)]
+
+
+def _get_l2norm_kernel2_static_key(x):
+    return {"D": int(x.shape[-1]), "DTYPE": str(x.dtype)}
+
+
+def _get_l2norm_kernel2_run_key(x):
+    return int(x.shape[0])
+
+
+@autotune(
+    kernel_name="l2norm_fwd_kernel2",
+    configs_gen_func=_get_l2norm_kernel2_configs,
+    static_key_func=_get_l2norm_kernel2_static_key,
+    run_key_func=_get_l2norm_kernel2_run_key,
+    mutates_args=["y"],
+)
+def _l2norm_fwd_kernel2_wrapper(x, y, eps, run_config=None):
+    if run_config is None:
+        run_config = {"num_warps": 4}
+    T, D = x.shape
+    MBLOCK = 32
+    l2norm_fwd_kernel2[(triton.cdiv(T, MBLOCK),)](
+        x,
+        y,
+        eps,
+        T,
+        D,
+        MBLOCK,
+        num_warps=int(run_config["num_warps"]),
+    )
+
+
 def l2norm_fwd(x: torch.Tensor, eps: float = 1e-6, output_dtype: torch.dtype | None = None):
     x_shape_og = x.shape
     x = x.view(-1, x.shape[-1])
@@ -153,16 +188,7 @@ def l2norm_fwd(x: torch.Tensor, eps: float = 1e-6, output_dtype: torch.dtype | N
         raise RuntimeError("This layer doesn't support feature dim >= 64KB.")
 
     if not USE_DEFAULT_FLA_NORM:
-        MBLOCK = 32
-        # M, N = x.shape
-        l2norm_fwd_kernel2[(triton.cdiv(T, MBLOCK),)](
-            x,
-            y,
-            eps,
-            T,
-            D,
-            MBLOCK,
-        )
+        _l2norm_fwd_kernel2_wrapper(x, y, eps)
     else:
         if D <= 512:
             NB = triton.cdiv(T, 2048)

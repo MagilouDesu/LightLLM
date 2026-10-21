@@ -15,6 +15,48 @@ import torch
 import triton
 import triton.language as tl
 
+from lightllm.common.triton_utils.autotuner import autotune
+
+
+def _mtp_configs():
+    return [{"num_warps": w, "num_stages": s} for w in (1, 2, 4) for s in (1, 2, 3)]
+
+
+def _mtp_static(
+    q,
+    k,
+    v,
+    initial_state,
+    cu_seqlens,
+    ssm_state_indices,
+    ssm_state_write_indices,
+    num_accepted_tokens,
+    A_log,
+    dt_bias,
+    a_raw,
+    b_raw,
+    final_state,
+):
+    return {"H": int(k.shape[2]), "HV": int(v.shape[2]), "K": int(k.shape[-1]), "V": int(v.shape[-1])}
+
+
+def _mtp_run(
+    q,
+    k,
+    v,
+    initial_state,
+    cu_seqlens,
+    ssm_state_indices,
+    ssm_state_write_indices,
+    num_accepted_tokens,
+    A_log,
+    dt_bias,
+    a_raw,
+    b_raw,
+    final_state,
+):
+    return int(q.shape[1])
+
 
 # ---------------------------------------------------------------------------
 # Triton kernel
@@ -232,6 +274,13 @@ def _fused_recurrent_gated_delta_rule_fwd_cuda_kernel(
 # ---------------------------------------------------------------------------
 
 
+@autotune(
+    kernel_name="mtp_fused_recurrent:v1",
+    configs_gen_func=_mtp_configs,
+    static_key_func=_mtp_static,
+    run_key_func=_mtp_run,
+    mutates_args=["final_state"],
+)
 def mtp_fused_recurrent_gated_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -246,6 +295,7 @@ def mtp_fused_recurrent_gated_delta_rule(
     a_raw: torch.Tensor,
     b_raw: torch.Tensor,
     final_state: torch.Tensor,
+    run_config=None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused recurrent gated delta rule with fused gating (GDN layer).
 
@@ -291,8 +341,12 @@ def mtp_fused_recurrent_gated_delta_rule(
         num_stages = 1
     else:
         BV = min(triton.next_power_of_2(V), 8)
-        num_warps = 1
-        num_stages = 3
+        if run_config is None:
+            num_warps = 1
+            num_stages = 3
+        else:
+            num_warps = int(run_config["num_warps"])
+            num_stages = int(run_config["num_stages"])
     NV = triton.cdiv(V, BV)
 
     o = q.new_empty(v.shape)

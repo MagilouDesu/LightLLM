@@ -4,7 +4,21 @@ import triton
 import triton.language as tl
 import os
 
+from lightllm.common.triton_utils.autotuner import autotune
+
 rmsnorm_num_warps = int(os.getenv("RMSNORM_WARPS", "8"))
+
+
+def _rms_configs():
+    return [{"num_warps": w} for w in (1, 2, 4, 8, 16)]
+
+
+def _rms_static(x, weight, eps, out=None):
+    return {"N": int(x.shape[-1]), "x_dtype": str(x.dtype), "has_weight": weight is not None}
+
+
+def _rms_run(x, weight, eps, out=None):
+    return int(x.reshape(-1, x.shape[-1]).shape[0])
 
 
 @triton.jit
@@ -48,7 +62,13 @@ def _rms_norm_fwd_fused(
         tl.store(Y + cols * y_stride1, y.to(Y.dtype.element_ty), mask=mask)
 
 
-def rmsnorm_forward(x: torch.Tensor, weight: torch.Tensor, eps: float, out=None):
+@autotune(
+    kernel_name="rmsnorm_forward:v1",
+    configs_gen_func=_rms_configs,
+    static_key_func=_rms_static,
+    run_key_func=_rms_run,
+)
+def rmsnorm_forward(x: torch.Tensor, weight: torch.Tensor, eps: float, out=None, run_config=None):
     # allocate output
     y = torch.empty_like(x) if out is None else out
     # reshape input data into 2D tensor
@@ -81,7 +101,7 @@ def rmsnorm_forward(x: torch.Tensor, weight: torch.Tensor, eps: float, out=None)
         eps,
         HAS_WEIGHT=weight is not None,
         BLOCK_SIZE=BLOCK_SIZE,
-        num_warps=rmsnorm_num_warps,
+        num_warps=rmsnorm_num_warps if run_config is None else int(run_config["num_warps"]),
     )
     return y
 

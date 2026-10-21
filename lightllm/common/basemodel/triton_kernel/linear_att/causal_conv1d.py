@@ -5,7 +5,10 @@ from typing import Optional
 
 import torch
 import torch.nn.functional as F
+import triton
+import triton.language as tl
 
+from lightllm.common.triton_utils.autotuner import autotune
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -46,15 +49,9 @@ if not _HAS_MACA_CAUSAL_CONV1D:
         logger.info("Using sgl_kernel causal_conv1d CUDA kernels.")
     except ImportError:
         _HAS_SGL_CAUSAL_CONV1D = False
-        if _is_maca_platform():
-            logger.warning(
-                "Neither causal_conv1d nor sgl_kernel is available; "
-                "causal_conv1d will use the PyTorch fallback (slow on long prefill)."
-            )
-        else:
-            logger.warning(
-                "sgl_kernel is not available; causal_conv1d will use the PyTorch fallback (slow on long prefill)."
-            )
+        logger.info(
+            "causal_conv1d CUDA package is not installed; varlen prefill uses the Triton kernel."
+        )
 
 
 def _apply_activation(out: torch.Tensor, activation: Optional[str]) -> torch.Tensor:
@@ -367,6 +364,226 @@ def _causal_conv1d_fn_maca(
     )
 
 
+# Channel-contiguous varlen prefill. BLOCK_D matches 2 warps of 64 so each
+# thread owns one channel; loads stay unmasked because dim is a multiple of
+# BLOCK_D. A whole-sequence loop leaves too few CTAs on this GPU.
+_TRITON_CONV_BLOCK_D = 128
+_TRITON_CONV_BLOCK_T = 32
+
+
+@triton.jit
+def _causal_conv1d_varlen_kernel(
+    x_ptr,
+    w_ptr,
+    bias_ptr,
+    o_ptr,
+    state_ptr,
+    qsl_ptr,
+    cache_ptr,
+    has_init_ptr,
+    pad_slot_id,
+    stride_x_t,
+    stride_o_t,
+    stride_w_d,
+    stride_st_slot,
+    stride_st_d,
+    stride_st_w,
+    HAS_BIAS: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    BLOCK_T: tl.constexpr,
+):
+    seq = tl.program_id(0)
+    tile_t = tl.program_id(1)
+    tile_d = tl.program_id(2)
+    start = tl.load(qsl_ptr + seq).to(tl.int32)
+    end = tl.load(qsl_ptr + seq + 1).to(tl.int32)
+    seqlen = end - start
+    t0 = tile_t * BLOCK_T
+    if t0 >= seqlen:
+        return
+
+    slot = tl.load(cache_ptr + seq).to(tl.int32)
+    offs = tile_d * BLOCK_D + tl.arange(0, BLOCK_D)
+    offs = tl.max_contiguous(tl.multiple_of(offs, BLOCK_D), BLOCK_D)
+    x_base = x_ptr + offs
+    o_base = o_ptr + offs
+
+    if slot == pad_slot_id:
+        for ti in tl.static_range(BLOCK_T):
+            pos = t0 + ti
+            if pos < seqlen:
+                val = tl.load(x_base + (start + pos) * stride_x_t)
+                tl.store(o_base + (start + pos) * stride_o_t, val)
+        return
+
+    has_init = tl.load(has_init_ptr + seq).to(tl.int32)
+    w_base = w_ptr + offs * stride_w_d
+    w0 = tl.load(w_base).to(tl.float32)
+    w1 = tl.load(w_base + 1).to(tl.float32)
+    w2 = tl.load(w_base + 2).to(tl.float32)
+    w3 = tl.load(w_base + 3).to(tl.float32)
+    bias = tl.zeros((BLOCK_D,), dtype=tl.float32)
+    if HAS_BIAS:
+        bias = tl.load(bias_ptr + offs).to(tl.float32)
+
+    h0 = tl.zeros((BLOCK_D,), dtype=tl.float32)
+    h1 = tl.zeros((BLOCK_D,), dtype=tl.float32)
+    h2 = tl.zeros((BLOCK_D,), dtype=tl.float32)
+    if t0 == 0:
+        if has_init != 0:
+            st = state_ptr + slot * stride_st_slot + offs * stride_st_d
+            h0 = tl.load(st).to(tl.float32)
+            h1 = tl.load(st + stride_st_w).to(tl.float32)
+            h2 = tl.load(st + 2 * stride_st_w).to(tl.float32)
+    else:
+        h0 = tl.load(x_base + (start + t0 - 3) * stride_x_t).to(tl.float32)
+        h1 = tl.load(x_base + (start + t0 - 2) * stride_x_t).to(tl.float32)
+        h2 = tl.load(x_base + (start + t0 - 1) * stride_x_t).to(tl.float32)
+
+    if t0 + BLOCK_T <= seqlen:
+        for ti in tl.static_range(BLOCK_T):
+            pos = t0 + ti
+            xv = tl.load(x_base + (start + pos) * stride_x_t).to(tl.float32)
+            acc = bias + w0 * h0 + w1 * h1 + w2 * h2 + w3 * xv
+            acc = acc * tl.sigmoid(acc)
+            tl.store(o_base + (start + pos) * stride_o_t, acc.to(tl.bfloat16))
+            h0 = h1
+            h1 = h2
+            h2 = xv
+    else:
+        for ti in tl.static_range(BLOCK_T):
+            pos = t0 + ti
+            if pos < seqlen:
+                xv = tl.load(x_base + (start + pos) * stride_x_t).to(tl.float32)
+                acc = bias + w0 * h0 + w1 * h1 + w2 * h2 + w3 * xv
+                acc = acc * tl.sigmoid(acc)
+                tl.store(o_base + (start + pos) * stride_o_t, acc.to(tl.bfloat16))
+                h0 = h1
+                h1 = h2
+                h2 = xv
+
+    if seqlen > t0 and seqlen <= t0 + BLOCK_T:
+        st = state_ptr + slot * stride_st_slot + offs * stride_st_d
+        for col in tl.static_range(3):
+            src = seqlen - 3 + col
+            if src >= 0:
+                val = tl.load(x_base + (start + src) * stride_x_t)
+            elif has_init != 0:
+                val = tl.load(st + (src + 3) * stride_st_w)
+            else:
+                val = tl.zeros((BLOCK_D,), dtype=tl.bfloat16)
+            tl.store(st + col * stride_st_w, val)
+
+
+def _triton_varlen_supported(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: Optional[torch.Tensor],
+    query_start_loc: Optional[torch.Tensor],
+    cache_indices: Optional[torch.Tensor],
+    has_initial_state: Optional[torch.Tensor],
+    conv_states: Optional[torch.Tensor],
+    activation: Optional[str],
+) -> bool:
+    # Prefill passes int32 cu_seqlens, int32 slot ids, and a 1D bool has_init.
+    # Conv bias is optional: this model does not register one.
+    if _HAS_MACA_CAUSAL_CONV1D or _HAS_SGL_CAUSAL_CONV1D:
+        return False
+    if (
+        query_start_loc is None
+        or cache_indices is None
+        or has_initial_state is None
+        or conv_states is None
+        or activation is None
+    ):
+        return False
+    return (
+        x.ndim == 2
+        and x.is_cuda
+        and x.stride(0) == 1
+        and x.shape[0] % _TRITON_CONV_BLOCK_D == 0
+        and weight.ndim == 2
+        and weight.shape[1] == 4
+        and weight.stride(1) == 1
+        and query_start_loc.dtype == torch.int32
+        and cache_indices.dtype == torch.int32
+        and has_initial_state.dtype == torch.bool
+        and has_initial_state.ndim == 1
+    )
+
+
+def _conv_configs():
+    return [{"num_warps": w, "num_stages": s} for w in (1, 2, 4, 8) for s in (1, 2)]
+
+
+def _conv_static(x, weight, bias, query_start_loc, cache_indices, has_initial_state, conv_states, pad_slot_id):
+    return {"DIM": int(x.shape[0]), "WIDTH": int(weight.shape[-1]), "DTYPE": str(x.dtype)}
+
+
+def _conv_run(x, weight, bias, query_start_loc, cache_indices, has_initial_state, conv_states, pad_slot_id):
+    return int(x.shape[1])
+
+
+@autotune(
+    kernel_name="causal_conv1d_varlen:v1",
+    configs_gen_func=_conv_configs,
+    static_key_func=_conv_static,
+    run_key_func=_conv_run,
+    mutates_args=["conv_states"],
+)
+def _causal_conv1d_fn_triton(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: Optional[torch.Tensor],
+    query_start_loc: torch.Tensor,
+    cache_indices: Optional[torch.Tensor],
+    has_initial_state: Optional[torch.Tensor],
+    conv_states: torch.Tensor,
+    pad_slot_id: int,
+    run_config=None,
+) -> torch.Tensor:
+    dim = x.shape[0]
+    total = x.shape[1]
+    nseq = query_start_loc.shape[0] - 1
+    if nseq <= 0 or total <= 0:
+        return x
+
+    if _conv_state_feat_last(conv_states, dim):
+        stride_st_slot, stride_st_w, stride_st_d = conv_states.stride()
+    else:
+        stride_st_slot, stride_st_d, stride_st_w = conv_states.stride()
+
+    out = torch.empty_like(x)
+    grid = (
+        nseq,
+        triton.cdiv(total, _TRITON_CONV_BLOCK_T),
+        triton.cdiv(dim, _TRITON_CONV_BLOCK_D),
+    )
+    _causal_conv1d_varlen_kernel[grid](
+        x,
+        weight,
+        bias if bias is not None else x,
+        out,
+        conv_states,
+        query_start_loc,
+        cache_indices,
+        has_initial_state,
+        pad_slot_id,
+        x.stride(1),
+        out.stride(1),
+        weight.stride(0),
+        stride_st_slot,
+        stride_st_d,
+        stride_st_w,
+        HAS_BIAS=bias is not None,
+        BLOCK_D=_TRITON_CONV_BLOCK_D,
+        BLOCK_T=_TRITON_CONV_BLOCK_T,
+        num_warps=2 if run_config is None else int(run_config["num_warps"]),
+        num_stages=1 if run_config is None else int(run_config["num_stages"]),
+    )
+    return out
+
+
 def causal_conv1d_fn(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -411,9 +628,23 @@ def causal_conv1d_fn(
     if activation not in [None, "silu", "swish"]:
         raise NotImplementedError("activation must be None, silu, or swish")
 
+    bias = bias.contiguous() if bias is not None else None
+    if _triton_varlen_supported(
+        x, weight, bias, query_start_loc, cache_indices, has_initial_state, conv_states, activation
+    ):
+        return _causal_conv1d_fn_triton(
+            x,
+            weight,
+            bias,
+            query_start_loc,
+            cache_indices,
+            has_initial_state,
+            conv_states,
+            pad_slot_id,
+        )
+
     if x.stride(-1) != 1:
         x = x.contiguous()
-    bias = bias.contiguous() if bias is not None else None
 
     if _HAS_MACA_CAUSAL_CONV1D:
         return _causal_conv1d_fn_maca(

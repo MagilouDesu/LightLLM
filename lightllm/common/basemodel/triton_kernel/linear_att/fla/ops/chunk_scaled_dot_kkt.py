@@ -87,12 +87,25 @@ def chunk_scaled_dot_kkt_fwd_kernel(
     tl.store(p_A, b_A.to(p_A.dtype.element_ty), boundary_check=(0, 1))
 
 
+def _kkt_num_stages():
+    # MetaX shared memory is 64KB. Stage 1 was missing from this search,
+    # unlike chunk_h / chunk_o which force stages=[1] on maca.
+    try:
+        from lightllm.platform import get_backend
+
+        if get_backend().name == "maca":
+            return [1, 2, 3, 4]
+    except Exception:
+        pass
+    return [2, 3, 4]
+
+
 def _get_chunk_scaled_dot_kkt_configs():
     return [
         {"BK": BK, "num_warps": num_warps, "num_stages": num_stages}
         for BK in [32, 64, 128]
         for num_warps in [2, 4, 8]
-        for num_stages in [2, 3, 4]
+        for num_stages in _kkt_num_stages()
     ]
 
 

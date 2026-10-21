@@ -1,0 +1,8 @@
+{
+  "32": {
+    "BLOCK_N": 16,
+    "num_stages": 2,
+    "num_warps": 2,
+    "scenario": "mla"
+  }
+}

@@ -7,6 +7,8 @@ import torch
 import triton
 import triton.language as tl
 
+from lightllm.common.triton_utils.autotuner import autotune
+
 
 def _next_pow2(n: int) -> int:
     return 1 if n <= 1 else 1 << (n - 1).bit_length()
@@ -270,7 +272,37 @@ def _fwd_int8kv_decode_stage2(
     )
 
 
+def _int8_decode_configs():
+    # BLOCK_N=128 needs 90112 bytes of shared memory; the C500 limit is 65536.
+    return [
+        {"BLOCK_N": bn, "num_warps": w, "num_stages": s, "scenario": "mla"}
+        for bn in (16, 32, 64)
+        for w in (2, 4, 8)
+        for s in (1, 2)
+    ]
+
+
+def _int8_decode_static(q, k, k_scale, v, v_scale, cache_seqlens, page_size=None):
+    return {
+        "D": int(q.shape[-1]),
+        "PAGE": int(page_size),
+        "Q_LEN": int(q.shape[1]),
+        "N_Q": int(q.shape[2]),
+        "N_KV": int(k.shape[1]),
+    }
+
+
+def _int8_decode_run(q, k, k_scale, v, v_scale, cache_seqlens, page_size=None):
+    return int(q.shape[0])
+
+
 @torch.no_grad()
+@autotune(
+    kernel_name="int8kv_flash_decode:v1",
+    configs_gen_func=_int8_decode_configs,
+    static_key_func=_int8_decode_static,
+    run_key_func=_int8_decode_run,
+)
 def int8kv_flash_decode(
     q: torch.Tensor,
     k: torch.Tensor,

@@ -19,7 +19,20 @@ import triton.language as tl
 from .index import prepare_chunk_indices
 from .op import make_tensor_descriptor
 from .utils import input_guard, is_amd, is_tma_supported
+from lightllm.common.triton_utils.autotuner import autotune
 from lightllm.utils.device_utils import get_target_device
+
+
+def _solve_tril_configs():
+    return [{"num_warps": w, "num_stages": s} for w in (1, 2, 4, 8) for s in (1, 2, 3)]
+
+
+def _solve_tril_static(A, cu_seqlens=None):
+    return {"BT": int(A.shape[-1]), "H": int(A.shape[-2]), "IS_VARLEN": cu_seqlens is not None}
+
+
+def _solve_tril_run(A, cu_seqlens=None):
+    return int(A.shape[1])
 
 
 def _ensure_triton_allocator():
@@ -458,11 +471,18 @@ def merge_16x16_to_64x64_inverse_kernel(
         desc_o.store([i_t * BT + 48, 32], b_Ai_43.to(desc_o.dtype, fp_downcast_rounding="rtne"))
 
 
+@autotune(
+    kernel_name="solve_tril:v1",
+    configs_gen_func=_solve_tril_configs,
+    static_key_func=_solve_tril_static,
+    run_key_func=_solve_tril_run,
+)
 @input_guard
 def solve_tril(
     A: torch.Tensor,
     cu_seqlens: torch.Tensor | None = None,
     output_dtype: torch.dtype = torch.float,
+    run_config=None,
 ) -> torch.Tensor:
     """
     Compute the inverse of the matrix I + A
@@ -510,6 +530,8 @@ def solve_tril(
     if is_tma_supported:
         _ensure_triton_allocator()
 
+    # Triton default when omitted is 4 warps / 3 stages.
+    tril_cfg = {"num_warps": 4, "num_stages": 3} if run_config is None else run_config
     merge_fn[NT, B * H](
         A=A,
         Ai=Ai,
@@ -520,5 +542,7 @@ def solve_tril(
         BT=BT,
         USE_TMA=is_tma_supported,
         DOT_PRECISION=FLA_TRIL_PRECISION,
+        num_warps=int(tril_cfg["num_warps"]),
+        num_stages=int(tril_cfg["num_stages"]),
     )
     return Ai
