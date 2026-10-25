@@ -134,25 +134,55 @@ class w8a8QuantizationMethod(BaseQuantizationMethod):
         return mm_param, mm_param_list
 
 
+_mctlass_gemm = None
+
+
+def _mctlass_scaled_gemm():
+    global _mctlass_gemm
+    if _mctlass_gemm is None:
+        from mctlassEx import ScaledGEMM
+
+        _mctlass_gemm = ScaledGEMM()
+    return _mctlass_gemm
+
+
 @QUANTMETHODS.register(["w8a8-vllm", "w8a8"], platform="maca")
 class w8a8MacaQuantizationMethod(w8a8QuantizationMethod):
+    def apply(
+        self,
+        input_tensor: torch.Tensor,
+        weight_pack: WeightPack,
+        out: Optional[torch.Tensor] = None,
+        workspace: Optional[torch.Tensor] = None,
+        use_custom_tensor_mananger: bool = True,
+        bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        weight = weight_pack.weight
+        x_q, x_scale, _ = vllm_ops.scaled_int8_quant(input_tensor, scale=None, azp=None, symmetric=True)
+        m, n = input_tensor.shape[0], weight.shape[0]
+        if out is None:
+            if use_custom_tensor_mananger:
+                out = self.cache_manager.alloc_tensor((m, n), input_tensor.dtype, device=input_tensor.device)
+            else:
+                out = torch.empty((m, n), dtype=input_tensor.dtype, device=input_tensor.device)
+        self._scaled_mm(out, x_q, weight, x_scale, weight_pack.weight_scale, bias)
+        return out
+
     @staticmethod
-    def _scaled_mm(out, x_q, qweight, x_scale, weight_scale, bias):
-        # MetaX cutlass INT8 GEMM can leave output tiles unwritten when M has
-        # both complete 256-row tiles and a partial tail (e.g. M=293, N=5120,
-        # K=6144). Run the full tiles and tail separately; neither call needs
-        # padding or extra output storage. Per-token scales follow the rows.
-        rows = x_q.shape[0]
-        full_rows = rows // 256 * 256
-        if full_rows and full_rows != rows:
-            cutlass_scaled_mm(
-                out[:full_rows], x_q[:full_rows], qweight, x_scale[:full_rows], weight_scale, bias
-            )
-            cutlass_scaled_mm(
-                out[full_rows:], x_q[full_rows:], qweight, x_scale[full_rows:], weight_scale, bias
-            )
-        else:
-            cutlass_scaled_mm(out, x_q, qweight, x_scale, weight_scale, bias)
+    def _scaled_mm(
+        out: torch.Tensor,
+        x_q: torch.Tensor,
+        weight: torch.Tensor,
+        x_scale: torch.Tensor,
+        weight_scale: torch.Tensor,
+        bias: Optional[torch.Tensor],
+    ) -> None:
+        m, k = x_q.shape
+        n = weight.shape[0]
+        scale_a = x_scale.reshape(m, 1)
+        scale_b = weight_scale.reshape(n, 1)
+        gemm_bias = None if bias is None else bias.reshape(n, 1)
+        _mctlass_scaled_gemm()([m, n, k], x_q, weight, out, scale_a, scale_b, gemm_bias)
 
 
 @QUANTMETHODS.register(["w8a8-vllm", "w8a8"], platform="mlu")

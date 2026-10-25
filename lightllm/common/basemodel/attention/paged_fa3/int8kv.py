@@ -13,8 +13,8 @@ from .fp import (
     PagedFa3AttBackend,
     PagedFa3DecodeAttState,
     PagedFa3PrefillAttState,
-    maca_flash_attn_varlen_func,
 )
+from .fp_maca import maca_flash_attn_varlen_func
 from .fp_npu import (
     PagedFa3AscendAttBackend,
     PagedFa3AscendDecodeAttState,

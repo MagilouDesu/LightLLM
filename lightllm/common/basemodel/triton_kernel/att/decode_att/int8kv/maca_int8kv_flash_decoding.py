@@ -32,7 +32,7 @@ def _default_run_config(head_dim: int, page_size: Optional[int] = None) -> dict:
     return {
         "BLOCK_N": 16,
         "BLOCK_SEQ": page_size if page_size else 256,
-        "num_warps": 4,
+        "num_warps": 2,
         "num_stages": 2,
         "scenario": "mla",
     }
@@ -155,16 +155,16 @@ def _fwd_int8kv_decode_stage1(
             else:
                 kv_loc = page_base + (offs_n - block_start)
 
-            k_i8 = tl.load(
-                K + kv_loc[None, :] * stride_k_t + cur_kv_head * stride_k_h + offs_d[:, None] * stride_k_d,
-                mask=n_mask[None, :] & d_mask[:, None],
-                other=0,
-            )
-            k_s = tl.load(
-                K_scale + kv_loc[None, :] * stride_ks_t + cur_kv_head * stride_ks_h + offs_g[:, None] * stride_ks_g,
-                mask=n_mask[None, :] & g_mask[:, None],
-                other=0.0,
-            )
+            k_ptr = K + kv_loc[None, :] * stride_k_t + cur_kv_head * stride_k_h + offs_d[:, None] * stride_k_d
+            ks_ptr = K_scale + kv_loc[None, :] * stride_ks_t + cur_kv_head * stride_ks_h + offs_g[:, None] * stride_ks_g
+            # A full page has HEAD_DIM == BLOCK_D, so the predicate is all-true.
+            # Dropping it lets the compiler emit vector loads instead of predicated gathers.
+            if (not USE_TOKEN_TABLE) and HEAD_DIM == BLOCK_D and block_end == block_start + PAGE_SIZE:
+                k_i8 = tl.load(k_ptr)
+                k_s = tl.load(ks_ptr)
+            else:
+                k_i8 = tl.load(k_ptr, mask=n_mask[None, :] & d_mask[:, None], other=0)
+                k_s = tl.load(ks_ptr, mask=n_mask[None, :] & g_mask[:, None], other=0.0)
             k_i8 = tl.reshape(k_i8, (NUM_GROUPS, GROUP_SIZE, BLOCK_N))
             k_s = tl.reshape(k_s, (NUM_GROUPS, 1, BLOCK_N))
             k = tl.reshape((k_i8.to(q.dtype) * k_s.to(q.dtype)), (BLOCK_D, BLOCK_N))
@@ -178,16 +178,14 @@ def _fwd_int8kv_decode_stage1(
                 vis = vis & (offs_n[None, :] >= win_lo[:, None])
             qk = tl.where(vis, qk, -1.0e10)
 
-            v_i8 = tl.load(
-                V + kv_loc[:, None] * stride_v_t + cur_kv_head * stride_v_h + offs_d[None, :] * stride_v_d,
-                mask=n_mask[:, None] & d_mask[None, :],
-                other=0,
-            )
-            v_s = tl.load(
-                V_scale + kv_loc[:, None] * stride_vs_t + cur_kv_head * stride_vs_h + offs_g[None, :] * stride_vs_g,
-                mask=n_mask[:, None] & g_mask[None, :],
-                other=0.0,
-            )
+            v_ptr = V + kv_loc[:, None] * stride_v_t + cur_kv_head * stride_v_h + offs_d[None, :] * stride_v_d
+            vs_ptr = V_scale + kv_loc[:, None] * stride_vs_t + cur_kv_head * stride_vs_h + offs_g[None, :] * stride_vs_g
+            if (not USE_TOKEN_TABLE) and HEAD_DIM == BLOCK_D and block_end == block_start + PAGE_SIZE:
+                v_i8 = tl.load(v_ptr)
+                v_s = tl.load(vs_ptr)
+            else:
+                v_i8 = tl.load(v_ptr, mask=n_mask[:, None] & d_mask[None, :], other=0)
+                v_s = tl.load(vs_ptr, mask=n_mask[:, None] & g_mask[None, :], other=0.0)
             v_i8 = tl.reshape(v_i8, (BLOCK_N, NUM_GROUPS, GROUP_SIZE))
             v_s = tl.reshape(v_s, (BLOCK_N, NUM_GROUPS, 1))
             v = tl.reshape((v_i8.to(q.dtype) * v_s.to(q.dtype)), (BLOCK_N, BLOCK_D))

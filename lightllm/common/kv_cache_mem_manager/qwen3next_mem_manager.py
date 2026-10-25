@@ -5,7 +5,11 @@ from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
 from lightllm.utils.envs_utils import get_env_start_args, get_page_size
 from lightllm.common.linear_att_cache_manager import LinearAttCacheConfig, LinearAttCacheManager
 from .operator import LinearAttMemOperator
-from .operator.linear_att import Int8KVLinearAttMemOperator, NpuLinearAttMemOperator
+from .operator.linear_att import (
+    Int8KVLinearAttMemOperator,
+    MacaSplitLinearAttMemOperator,
+    NpuLinearAttMemOperator,
+)
 from .npu_mem_manager import NPUInt8KVMemoryManager, NPUInt8KVOperator
 from lightllm.utils.device_utils import get_target_device
 from typing import Tuple, Any, List
@@ -60,7 +64,10 @@ class Qwen3NextMemManager(MemoryManager):
 
         super().__init__(size, dtype, num_kv_heads, head_dim, full_att_layer_num, always_copy, mem_fraction)
         if self._split_full_att_kv:
-            self.operator = self.npu_operator_class(self)
+            if torch.device(self.target_device).type == "npu":
+                self.operator = self.npu_operator_class(self)
+            else:
+                self.operator = MacaSplitLinearAttMemOperator(self)
 
     def get_full_att_cache_layer_index(self, layer_index: int) -> int:
         return self.linear_config.get_full_att_kv_layer_index(layer_index)
@@ -72,7 +79,9 @@ class Qwen3NextMemManager(MemoryManager):
         return super().get_att_input_params(layer_index)
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
-        self._split_full_att_kv = torch.device(self.target_device).type == "npu"
+        self._split_full_att_kv = torch.device(self.target_device).type == "npu" or (
+            get_env_start_args().hardware_platform == "maca"
+        )
         if self._split_full_att_kv:
             page_size = get_page_size()
             alloc_size = ((size // page_size) + 1) * page_size if page_size > 1 else size + 1

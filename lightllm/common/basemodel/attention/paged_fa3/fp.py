@@ -2,7 +2,6 @@ import dataclasses
 
 import torch
 import triton
-import triton.language as tl
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache
@@ -11,62 +10,13 @@ from lightllm.common.basemodel.triton_kernel.fa3_utils import page_table_copy
 from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
 from lightllm.platform.base.attention import register_att_backend
 
-try:
-    from flash_attn import flash_attn_varlen_func as maca_flash_attn_varlen_func
-    from flash_attn import flash_attn_with_kvcache as maca_flash_attn_with_kvcache
-except ImportError:
-    maca_flash_attn_varlen_func = None
-    maca_flash_attn_with_kvcache = None
-
-
-@triton.jit
-def _gather_block_kv_kernel(
-    K, V, OUT_K, OUT_V, REQ_TO_TOKEN, REQ_IDS, SEQ_LENS, CU_K,
-    REQ_STRIDE: tl.constexpr, K_STRIDE: tl.constexpr, V_STRIDE: tl.constexpr,
-    K_HEAD_STRIDE: tl.constexpr, V_HEAD_STRIDE: tl.constexpr,
-    K_DIM_STRIDE: tl.constexpr, V_DIM_STRIDE: tl.constexpr,
-    HEADS: tl.constexpr, DIM: tl.constexpr, BLOCK: tl.constexpr,
-):
-    batch = tl.program_id(1)
-    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    token = offsets // (HEADS * DIM)
-    feature = offsets % (HEADS * DIM)
-    seq_len = tl.load(SEQ_LENS + batch)
-    req = tl.load(REQ_IDS + batch)
-    start = tl.load(CU_K + batch)
-    valid = token < seq_len
-    slot = tl.load(REQ_TO_TOKEN + req * REQ_STRIDE + token, mask=valid, other=0)
-    kval = tl.load(K + slot * K_STRIDE + feature // DIM * K_HEAD_STRIDE
-                   + feature % DIM * K_DIM_STRIDE, mask=valid, other=0)
-    vval = tl.load(V + slot * V_STRIDE + feature // DIM * V_HEAD_STRIDE
-                   + feature % DIM * V_DIM_STRIDE, mask=valid, other=0)
-    output_offset = (start + token) * HEADS * DIM + feature
-    tl.store(OUT_K + output_offset, kval, mask=valid)
-    tl.store(OUT_V + output_offset, vval, mask=valid)
-
-
-# Ascend FIA lives in fp_npu.py (PagedFa3AscendAttBackend).
-@register_att_backend(name="paged_fa3", category="standard", platforms=("cuda", "maca"), validate_name="fa3")
+# Ascend FIA lives in fp_npu.py. MetaX lives in fp_maca.py.
+@register_att_backend(name="paged_fa3", category="standard", platforms=("cuda",), validate_name="fa3")
 class PagedFa3AttBackend(BaseAttBackend):
 
     def __init__(self, model, page_size=None):
         super().__init__(model=model)
         self.page_size = page_size or get_page_size()
-        self.is_maca = get_env_start_args().hardware_platform == "maca"
-        if self.is_maca:
-            if self.page_size % 16 != 0:
-                raise ValueError(
-                    "MetaX FlashAttention requires PAGE_SIZE to be a multiple "
-                    f"of 16, but got PAGE_SIZE={self.page_size}"
-                )
-            if (
-                maca_flash_attn_varlen_func is None
-                or maca_flash_attn_with_kvcache is None
-            ):
-                raise RuntimeError(
-                    "MetaX paged FlashAttention requires flash_attn_varlen_func "
-                    "and flash_attn_with_kvcache from the flash_attn package"
-                )
         self.get_page_table_buffer()
 
     def get_page_table_buffer(self):
@@ -125,26 +75,6 @@ class PagedFa3PrefillAttState(BasePrefillAttState):
             sink_weight = None
 
         sm_scale = 1.0 / (q.shape[-1] ** 0.5)
-
-        if self.backend.is_maca:
-            if sink_weight is not None:
-                raise NotImplementedError(
-                    "MetaX FlashAttention does not support attention sinks"
-                )
-            return maca_flash_attn_varlen_func(
-                q=q,
-                k=k.view(-1, self.backend.page_size, k.shape[1], k.shape[2]),
-                v=v.view(-1, self.backend.page_size, v.shape[1], v.shape[2]),
-                block_table=self.page_table,
-                cu_seqlens_q=self.cu_seqlens_q,
-                cu_seqlens_k=self.cu_seqlens_k,
-                max_seqlen_q=self.infer_state.max_q_seq_len,
-                max_seqlen_k=self.infer_state.max_kv_seq_len,
-                softmax_scale=sm_scale,
-                causal=True,
-                window_size=window_size,
-                softcap=0.0,
-            )
         return flash_attn_with_kvcache(
             q=q,
             k_cache=k.view(-1, self.backend.page_size, k.shape[1], k.shape[2]),
@@ -299,42 +229,17 @@ class PagedFa3DecodeAttState(BaseDecodeAttState):
         return self._normal_decode_att(q=q, k=k, v=v, att_control=att_control, alloc_func=alloc_func)
 
     def _block_decode_att(self, q, k, v, window_size, sink_weight, alloc_func):
+        # CUDA FA3 supports token-sized pages directly, avoiding a KV copy.
         req_to_token = self.backend.model.req_manager.req_to_token_indexs
-        if not self.backend.is_maca:
-            # CUDA FA3 supports token-sized pages directly, avoiding a KV copy.
-            token_table = req_to_token[self.b_block_req_idx, :self.block_max_kv_len].int().contiguous()
-            return flash_attn_with_kvcache(
-                q=q, k_cache=k.unsqueeze(1), v_cache=v.unsqueeze(1),
-                page_table=token_table, cache_seqlens=self.b_att_seq_len,
-                cu_seqlens_q=self.cu_seqlens_q, cu_seqlens_k_new=self.cu_seqlens_k,
-                max_seqlen_q=self.decode_max_q_seq_len,
-                softmax_scale=q.shape[-1] ** -0.5, causal=False,
-                window_size=window_size, softcap=0.0,
-                k_descale=None, v_descale=None, return_softmax_lse=False, sinks=sink_weight,
-            )
-        if sink_weight is not None:
-            raise NotImplementedError("MetaX FlashAttention does not support attention sinks")
-        # One packed gather per block, shared by every query in the block.
-        # Allocate an upper bound; GPU cumulative lengths delimit actual KV.
-        # No host reads or data-dependent allocations during graph capture.
-        shape = (self.b_block_req_idx.shape[0] * self.block_max_kv_len, k.shape[1], k.shape[2])
-        packed_k = alloc_func(shape, dtype=k.dtype, device=k.device)
-        packed_v = alloc_func(shape, dtype=v.dtype, device=v.device)
-        _gather_block_kv_kernel[
-            (triton.cdiv(self.block_max_kv_len * k.shape[1] * k.shape[2], 256), self.b_block_req_idx.shape[0])
-        ](
-            k, v, packed_k, packed_v, req_to_token, self.b_block_req_idx,
-            self.b_att_seq_len, self.cu_seqlens_k,
-            req_to_token.stride(0), k.stride(0), v.stride(0),
-            k.stride(1), v.stride(1), k.stride(2), v.stride(2),
-            k.shape[1], k.shape[2], 256,
-        )
-        return maca_flash_attn_varlen_func(
-            q=q, k=packed_k, v=packed_v,
-            cu_seqlens_q=self.cu_seqlens_q, cu_seqlens_k=self.cu_seqlens_k,
-            max_seqlen_q=self.decode_max_q_seq_len, max_seqlen_k=self.block_max_kv_len,
+        token_table = req_to_token[self.b_block_req_idx, :self.block_max_kv_len].int().contiguous()
+        return flash_attn_with_kvcache(
+            q=q, k_cache=k.unsqueeze(1), v_cache=v.unsqueeze(1),
+            page_table=token_table, cache_seqlens=self.b_att_seq_len,
+            cu_seqlens_q=self.cu_seqlens_q, cu_seqlens_k_new=self.cu_seqlens_k,
+            max_seqlen_q=self.decode_max_q_seq_len,
             softmax_scale=q.shape[-1] ** -0.5, causal=False,
             window_size=window_size, softcap=0.0,
+            k_descale=None, v_descale=None, return_softmax_lse=False, sinks=sink_weight,
         )
 
     def _normal_decode_att(self, q, k, v, att_control: AttControl, alloc_func=torch.empty):
@@ -354,53 +259,6 @@ class PagedFa3DecodeAttState(BaseDecodeAttState):
             return self._block_decode_att(q, k, v, window_size, sink_weight, alloc_func)
 
         sm_scale = 1.0 / (q.shape[-1] ** 0.5)
-        if self.backend.is_maca:
-            if sink_weight is not None:
-                raise NotImplementedError(
-                    "MetaX FlashAttention does not support attention sinks"
-                )
-
-            if self.has_partial_block:
-                # BSHD kvcache requires a uniform query width; varlen handles
-                # the short trailing HOLD group without adding query rows.
-                return maca_flash_attn_varlen_func(
-                    q=q,
-                    k=k.view(-1, self.backend.page_size, k.shape[1], k.shape[2]),
-                    v=v.view(-1, self.backend.page_size, v.shape[1], v.shape[2]),
-                    block_table=self.page_table,
-                    cu_seqlens_q=self.cu_seqlens_q,
-                    cu_seqlens_k=self.cu_seqlens_k,
-                    max_seqlen_q=self.decode_max_q_seq_len,
-                    max_seqlen_k=self.infer_state.max_kv_seq_len,
-                    softmax_scale=sm_scale,
-                    causal=self.causal,
-                    window_size=window_size,
-                    softcap=0.0,
-                )
-
-            att_batch_size = self.page_table.shape[0]
-            expected_tokens = att_batch_size * self.decode_max_q_seq_len
-            if q.shape[0] != expected_tokens:
-                raise ValueError(
-                    "Unexpected MetaX decode query shape: "
-                    f"q tokens={q.shape[0]}, batch={att_batch_size}, "
-                    f"q_len={self.decode_max_q_seq_len}"
-                )
-            q_bshd = q.view(
-                att_batch_size, self.decode_max_q_seq_len, q.shape[1], q.shape[2]
-            )
-            output = maca_flash_attn_with_kvcache(
-                q=q_bshd,
-                k_cache=k.view(-1, self.backend.page_size, k.shape[1], k.shape[2]),
-                v_cache=v.view(-1, self.backend.page_size, v.shape[1], v.shape[2]),
-                block_table=self.page_table,
-                cache_seqlens=self.b_att_seq_len,
-                softmax_scale=sm_scale,
-                causal=self.causal,
-                window_size=window_size,
-                softcap=0.0,
-            )
-            return output.view_as(q)
         return flash_attn_with_kvcache(
             q=q,
             k_cache=k.view(-1, self.backend.page_size, k.shape[1], k.shape[2]),

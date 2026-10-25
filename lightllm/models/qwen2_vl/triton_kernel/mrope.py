@@ -8,6 +8,86 @@ from lightllm.common.triton_utils.autotuner import autotune
 
 logger = init_logger(__name__)
 
+try:
+    from rotary_emb import apply_rotary as _apply_rotary
+except ImportError:
+    _apply_rotary = None
+
+# Plane masks depend only on the section and rotary width, not on the token count.
+_MROPE_MASK_CACHE = {}
+
+
+def _mrope_plane_masks(mrope_section: torch.Tensor, half: int, is_interleaved: bool, device):
+    # Key off the section storage. Reading the values back to the host syncs and
+    # breaks CUDA graph capture.
+    key = (mrope_section.data_ptr(), half, is_interleaved, str(device))
+    cached = _MROPE_MASK_CACHE.get(key)
+    if cached is not None:
+        return cached
+    offsets = torch.arange(half, device=device)
+    sec = mrope_section.to(device=device)
+    if is_interleaved:
+        h_mask = ((offsets % 3) == 1) & (offsets <= 3 * sec[1])
+        w_mask = ((offsets % 3) == 2) & (offsets <= 3 * sec[2])
+        t_mask = ~(h_mask | w_mask)
+    else:
+        t_end = sec[0]
+        h_end = sec[0] + sec[1]
+        t_mask = offsets < t_end
+        h_mask = (offsets >= t_end) & (offsets < h_end)
+        w_mask = offsets >= h_end
+    masks = (t_mask, h_mask, w_mask)
+    _MROPE_MASK_CACHE[key] = masks
+    return masks
+
+
+def _mix_mrope_plane(cos: torch.Tensor, t_mask, h_mask, w_mask) -> torch.Tensor:
+    # cos is [3, tokens, half]. Masks are mutually exclusive, matching the Triton kernel.
+    return torch.where(t_mask, cos[0], torch.where(h_mask, cos[1], cos[2]))
+
+
+def _rotate_halves(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, rotary_dim: int) -> None:
+    half = rotary_dim // 2
+    x1 = x[..., :half]
+    x2 = x[..., half:rotary_dim]
+    if not x1.is_contiguous() or not x2.is_contiguous():
+        x1c = x1.contiguous()
+        x2c = x2.contiguous()
+        _apply_rotary(x1c, x2c, cos, sin, x1c, x2c, False)
+        x1.copy_(x1c)
+        x2.copy_(x2c)
+        return
+    # Elementwise kernel reads both halves before writing them.
+    _apply_rotary(x1, x2, cos, sin, x1, x2, False)
+
+
+def _mrope_rotary_emb(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    mrope_section: torch.Tensor,
+    is_interleaved: bool,
+    partial_rotary_factor: float,
+) -> bool:
+    if _apply_rotary is None or q.device.type != "cuda":
+        return False
+    rotary_dim = int(q.shape[-1] * partial_rotary_factor)
+    if rotary_dim <= 0 or rotary_dim % 2 != 0:
+        return False
+    half = rotary_dim // 2
+    if cos.shape[0] != 3 or cos.shape[-1] < half or sin.shape != cos.shape:
+        return False
+    t_mask, h_mask, w_mask = _mrope_plane_masks(mrope_section, half, is_interleaved, q.device)
+    cos_h = cos[..., :half]
+    sin_h = sin[..., :half]
+    mixed_cos = _mix_mrope_plane(cos_h, t_mask, h_mask, w_mask).unsqueeze(1)
+    mixed_sin = _mix_mrope_plane(sin_h, t_mask, h_mask, w_mask).unsqueeze(1)
+    _rotate_halves(q, mixed_cos, mixed_sin, rotary_dim)
+    if k is not None:
+        _rotate_halves(k, mixed_cos, mixed_sin, rotary_dim)
+    return True
+
 
 def build_mrope_flat_idx(mrope_section, head_dim: int, device) -> torch.Tensor:
     if isinstance(mrope_section, torch.Tensor):
@@ -174,13 +254,6 @@ def get_static_key(q, k):
     }
 
 
-@autotune(
-    kernel_name="mrope_triton_fused:v1",
-    configs_gen_func=get_test_configs,
-    static_key_func=get_static_key,
-    run_key_func=lambda q: q.shape[0],
-    mutates_args=["q", "k"],
-)
 @torch.no_grad()
 def mrope_triton_fused(
     q: torch.Tensor,
@@ -201,6 +274,39 @@ def mrope_triton_fused(
             mrope_small(q, k, cos, sin, mrope_section, is_interleaved, partial_rotary_factor)
         return
 
+    if _mrope_rotary_emb(q, k, cos, sin, mrope_section, is_interleaved, partial_rotary_factor):
+        return
+
+    return _mrope_triton_fused_autotuned(
+        q,
+        k,
+        cos,
+        sin,
+        mrope_section,
+        is_interleaved,
+        partial_rotary_factor,
+        run_config=run_config,
+    )
+
+
+@autotune(
+    kernel_name="mrope_triton_fused:v1",
+    configs_gen_func=get_test_configs,
+    static_key_func=get_static_key,
+    run_key_func=lambda q: q.shape[0],
+    mutates_args=["q", "k"],
+)
+@torch.no_grad()
+def _mrope_triton_fused_autotuned(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    mrope_section: torch.Tensor,
+    is_interleaved: bool,
+    partial_rotary_factor: float = 1.0,
+    run_config: Optional[dict] = None,
+):
     head_num_q, head_num_k = q.shape[1], k.shape[1]
     head_dim = int(q.shape[2] * partial_rotary_factor)
     num_tokens = q.shape[0]

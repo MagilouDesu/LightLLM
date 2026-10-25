@@ -9,13 +9,9 @@ try:
 
     vllm_ops = ops
     HAS_VLLM = True
-    cutlass_scaled_mm = torch.ops._C.cutlass_scaled_mm
-
-except:
+except Exception:
     HAS_VLLM = False
-    cutlass_scaled_mm = None
     vllm_ops = None
-    logger.warning(
-        "vllm is not installed, you can't use the api of it. \
-                   You can solve it by running `pip install vllm`."
-    )
+    logger.warning("vllm is not installed, you can't use the api of it. You can solve it by running `pip install vllm`.")
+
+cutlass_scaled_mm = getattr(torch.ops._C, "cutlass_scaled_mm", None) if HAS_VLLM else None

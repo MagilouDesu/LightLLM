@@ -403,3 +403,14 @@ class NpuLinearAttMemOperator(LinearAttMemOperator):
             return super().offload_gpu_kv_to_cpu_cache(remap, page_indexes, page_readies, cpu_cache_client, req)
         finally:
             self.mem_manager.kv_buffer = old_kv
+
+
+class MacaSplitLinearAttMemOperator(NpuLinearAttMemOperator):
+
+    def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
+        mem_manager = self.mem_manager
+        layer_index = mem_manager.get_full_att_cache_layer_index(layer_index)
+        from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv
+
+        destindex_copy_kv(kv[:, : mem_manager.head_num, :], mem_index, mem_manager.k_buffer[layer_index])
+        destindex_copy_kv(kv[:, mem_manager.head_num :, :], mem_index, mem_manager.v_buffer[layer_index])
