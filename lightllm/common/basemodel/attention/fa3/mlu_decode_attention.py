@@ -33,8 +33,6 @@ def mlu_decode_attention_fwd(
     context_lens: torch.Tensor,
     window_left: int = -1,
 ) -> torch.Tensor:
-    logger.info("decode full attention on MLU uses torch_mlu_ops.single_query_cached_kv_attn")
-
     import torch_mlu_ops as tmo
 
     batch, q_heads, head_dim = q.shape

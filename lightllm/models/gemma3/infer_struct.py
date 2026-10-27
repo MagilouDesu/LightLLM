@@ -85,10 +85,10 @@ class Gemma3InferStateInfo(InferStateInfo):
 
         self.has_image_tokens = True
         build_b_image_token_end(
-            b_image_start_idx=torch.tensor(b_image_start_idx, dtype=torch.int32).cuda(non_blocking=True),
-            b_image_len=torch.tensor(b_image_len, dtype=torch.int32).cuda(non_blocking=True),
-            b_image_nums=torch.tensor(b_image_nums, dtype=torch.int32).cuda(non_blocking=True),
-            b_image_start_num=torch.tensor(b_image_start_num, dtype=torch.int32).cuda(non_blocking=True),
+            b_image_start_idx=torch.tensor(b_image_start_idx, dtype=torch.int32).to(device=device, non_blocking=True),
+            b_image_len=torch.tensor(b_image_len, dtype=torch.int32).to(device=device, non_blocking=True),
+            b_image_nums=torch.tensor(b_image_nums, dtype=torch.int32).to(device=device, non_blocking=True),
+            b_image_start_num=torch.tensor(b_image_start_num, dtype=torch.int32).to(device=device, non_blocking=True),
             b_q_start_loc=self.b_q_start_loc,
             b_ready_cache_len=self.b_ready_cache_len,
             b_q_seq_len=self.b_q_seq_len,
