@@ -122,6 +122,9 @@ def get_current_device_name():
     elif hasattr(torch, "npu") and torch.npu.is_available():
         device = torch.npu.current_device()
         device_name = torch.npu.get_device_name(device)
+    elif hasattr(torch, "mlu") and torch.mlu.is_available():
+        device = torch.mlu.current_device()
+        device_name = torch.mlu.get_device_name(device)
     else:
         return "unknown_device"
 

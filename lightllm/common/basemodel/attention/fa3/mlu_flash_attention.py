@@ -83,8 +83,6 @@ def mlu_context_attention_fwd(
     pack: MluFlashPack,
     sliding_window=(-1, -1),
 ):
-    logger.info("prefill full attention on MLU uses torch_mlu_ops.flash_attention")
-
     import torch_mlu_ops as tmo
 
     if sliding_window == (-1, -1):
