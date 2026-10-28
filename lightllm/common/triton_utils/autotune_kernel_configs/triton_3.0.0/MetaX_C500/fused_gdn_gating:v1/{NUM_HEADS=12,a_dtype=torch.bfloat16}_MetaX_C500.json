@@ -46,5 +46,9 @@
   "8": {
     "BLK_HEADS": 4,
     "num_warps": 2
+  },
+  "8192": {
+    "BLK_HEADS": 16,
+    "num_warps": 1
   }
 }

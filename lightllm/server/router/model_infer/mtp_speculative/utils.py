@@ -133,6 +133,13 @@ def verify_mtp_tokens(
     return accept_lengths, accepted_index
 
 
+def flush_staged_constraint_tokens(backend: ModeBackend) -> None:
+    manager = backend.model.req_manager.req_sampling_params_manager
+    flush = getattr(manager, "flush_staged_next_token_ids_cpu", None)
+    if flush is not None:
+        flush()
+
+
 def scatter_mtp_next_tokens(
     backend: ModeBackend,
     proposal: SpecProposal,  # proposal.token_ids: [req_num, draft_step]
@@ -140,6 +147,7 @@ def scatter_mtp_next_tokens(
     b_req_mtp_start_loc: torch.Tensor,  # [req_num]
     b_req_idx: torch.Tensor,  # [verify_batch_size]
     mtp_accept_len: torch.Tensor,  # [req_num]
+    reqs: List[InferReq] = None,
 ) -> None:
     """Persist the next MTP proposal and optional scheduling scores by request."""
 
@@ -160,6 +168,9 @@ def scatter_mtp_next_tokens(
         ),
         schedule_scores=schedule_scores,
     )
+    stage = getattr(sampling_params_manager, "stage_next_token_ids_cpu", None)
+    if stage is not None:
+        stage(b_req_idx, reqs)
 
 
 def record_request_mtp_metrics(

@@ -37,6 +37,14 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--httpserver_workers", type=int, default=1)
     parser.add_argument(
+        "--disable_delay_response_start",
+        action="store_true",
+        help=(
+            "Send streaming response status and headers immediately instead of waiting until the first "
+            "response chunk is ready."
+        ),
+    )
+    parser.add_argument(
         "--hypercorn_config",
         type=str,
         default=None,

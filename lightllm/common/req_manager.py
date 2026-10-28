@@ -11,7 +11,7 @@ from .kv_cache_mem_manager import MemoryManager
 from typing import List, Optional, TYPE_CHECKING
 from lightllm.common.basemodel.triton_kernel.gen_sampling_params import token_id_counter
 from lightllm.common.basemodel.triton_kernel.gen_sampling_params import update_req_to_token_id_counter
-from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args, get_page_size
+from lightllm.utils.envs_utils import get_env_start_args, get_page_size
 from lightllm.utils.config_utils import get_vocab_size
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.common.linear_att_cache_manager.layer_cache import LayerCache
@@ -256,6 +256,19 @@ class ReqSamplingParamsManager:
             dtype=torch.int64,
             device=self.target_device,
         )
+        self.req_to_next_token_ids_cpu = (
+            torch.zeros(
+                (max_request_num + 1, self.mtp_verify_width),
+                dtype=torch.int64,
+                device="cpu",
+                pin_memory=True,
+            )
+            if get_env_start_args().output_constraint_mode == "xgrammar"
+            else None
+        )
+        self._staged_next_token_ids = None
+        self._staged_next_token_index = None
+        self._staged_next_token_count = 0
         self.req_to_next_token_scores = (
             torch.zeros_like(self.req_to_next_token_ids, dtype=torch.float32)
             if get_env_start_args().mtp_dynamic_verify
@@ -275,9 +288,54 @@ class ReqSamplingParamsManager:
                 (max_request_num + 1, self.vocab_size), dtype=torch.int32, device="cpu", pin_memory=True
             )
 
+    def stage_next_token_ids_cpu(self, b_req_idx: torch.Tensor, reqs: Optional[List] = None) -> None:
+        if self.req_to_next_token_ids_cpu is None:
+            return
+        if reqs is not None:
+            constrained_req_ids = [
+                req.req_idx
+                for req in reqs
+                if req.sampling_param.guided_grammar is not None or req.sampling_param.guided_json is not None
+            ]
+        elif b_req_idx.numel() == 0:
+            constrained_req_ids = []
+        else:
+            constrained_req_ids = torch.unique(b_req_idx.cpu()).tolist()
+        if not constrained_req_ids:
+            self._staged_next_token_count = 0
+            return
+
+        row_count = len(constrained_req_ids)
+        if self._staged_next_token_ids is None or self._staged_next_token_ids.shape[0] < row_count:
+            capacity = max(row_count, 8)
+            self._staged_next_token_ids = torch.empty(
+                (capacity, self.mtp_verify_width), dtype=torch.int64, pin_memory=True
+            )
+            self._staged_next_token_index = torch.empty((capacity,), dtype=torch.long, pin_memory=True)
+        # The CPU copy of the ids is kept for flush; the GPU copy only drives index_select.
+        staged_index = self._staged_next_token_index[:row_count]
+        staged_index.numpy()[:] = constrained_req_ids
+        req_ids_gpu = staged_index.to(device=self.req_to_next_token_ids.device, non_blocking=True)
+        rows = self.req_to_next_token_ids.index_select(0, req_ids_gpu)
+        self._staged_next_token_ids[:row_count].copy_(rows, non_blocking=True)
+        self._staged_next_token_count = row_count
+
+    def flush_staged_next_token_ids_cpu(self) -> None:
+        row_count = self._staged_next_token_count
+        if row_count <= 0 or self.req_to_next_token_ids_cpu is None:
+            return
+        self.req_to_next_token_ids_cpu.index_copy_(
+            0,
+            self._staged_next_token_index[:row_count],
+            self._staged_next_token_ids[:row_count],
+        )
+        self._staged_next_token_count = 0
+
     def init_req_sampling_params(self, req: "InferReq"):
         shm_param = req.sampling_param.shm_param
         self.req_to_next_token_ids[req.req_idx][0:1].fill_(req.get_last_gen_token())
+        if self.req_to_next_token_ids_cpu is not None:
+            self.req_to_next_token_ids_cpu[req.req_idx][0:1].fill_(req.get_last_gen_token())
         if self.req_to_next_token_scores is not None:
             self.req_to_next_token_scores[req.req_idx].fill_(0.0)
             self.req_to_next_token_scores[req.req_idx][0:1].fill_(1.0)

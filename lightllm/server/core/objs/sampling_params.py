@@ -34,13 +34,21 @@ class StopSequence(ctypes.Structure):
 
     def initialize(self, sequence: List[int], sequence_str: Optional[str] = None):
         self.size = len(sequence)
-        assert self.size <= STOP_SEQUENCE_MAX_LENGTH, "stop token length too long."
-        assert all(isinstance(e, int) for e in sequence), "all must be int"
+        if self.size > STOP_SEQUENCE_MAX_LENGTH:
+            raise ValueError(
+                f"stop token sequence is too long: {self.size} > {STOP_SEQUENCE_MAX_LENGTH}"
+            )
+        if not all(isinstance(e, int) for e in sequence):
+            raise ValueError("all stop token IDs must be integers")
         self.sequence[: self.size] = sequence[:]
 
         if sequence_str is not None:
             sequence_str_bytes = sequence_str.encode("utf-8")
-            assert len(sequence_str_bytes) < STOP_SEQUENCE_STR_MAX_LENGTH, "stop sequence string too long."
+            if len(sequence_str_bytes) >= STOP_SEQUENCE_STR_MAX_LENGTH:
+                raise ValueError(
+                    f"stop sequence string is too long: {len(sequence_str_bytes)} UTF-8 bytes; "
+                    f"maximum is {STOP_SEQUENCE_STR_MAX_LENGTH - 1}"
+                )
             self.sequence_str = sequence_str_bytes
             self.sequence_str_len = len(sequence_str_bytes)
         else:
@@ -68,7 +76,8 @@ class StopSequenceGroups(ctypes.Structure):
 
         groups: List[List[int]] = self.stop_sentences_to_token_ids(stop_sequences, tokenizer)
         self.size = len(groups)
-        assert self.size <= MAX_STOP_SEQUENCES, "Too many stop sequence groups."
+        if self.size > MAX_STOP_SEQUENCES:
+            raise ValueError(f"too many stop sequences: {self.size} > {MAX_STOP_SEQUENCES}")
 
         for group_idx in range(self.size):
             if isinstance(stop_sequences[group_idx], str):
@@ -88,7 +97,7 @@ class StopSequenceGroups(ctypes.Structure):
                     if len(stop_info) > 0:
                         new_stop_sequences.append(stop_info)
                 else:
-                    assert False, "stop_sequences item must be type List[int] when it is a list."
+                    raise ValueError("stop_sequences list items must contain only integer token IDs")
         return new_stop_sequences
 
     def _stop_str_to_token_ids(self, stop_str: str, tokenizer) -> List[int]:
@@ -148,7 +157,10 @@ class GuidedGrammar(ctypes.Structure):
         try:
             if self.length > 0 and tokenizer is not None and constraint != "json":
                 import xgrammar as xgr
+                from transformers import PreTrainedTokenizerBase
 
+                while not isinstance(tokenizer, PreTrainedTokenizerBase) and hasattr(tokenizer, "tokenizer"):
+                    tokenizer = tokenizer.tokenizer
                 tokenizer_info = xgr.TokenizerInfo.from_huggingface(tokenizer)
                 xgrammar_compiler = xgr.GrammarCompiler(tokenizer_info, max_threads=8)
                 xgrammar_compiler.compile_grammar(constraint)
@@ -178,7 +190,10 @@ class GuidedJsonSchema(ctypes.Structure):
         try:
             if self.length > 0 and tokenizer is not None:
                 import xgrammar as xgr
+                from transformers import PreTrainedTokenizerBase
 
+                while not isinstance(tokenizer, PreTrainedTokenizerBase) and hasattr(tokenizer, "tokenizer"):
+                    tokenizer = tokenizer.tokenizer
                 tokenizer_info = xgr.TokenizerInfo.from_huggingface(tokenizer)
                 xgrammar_compiler = xgr.GrammarCompiler(tokenizer_info, max_threads=8)
                 xgrammar_compiler.compile_json_schema(constraint)

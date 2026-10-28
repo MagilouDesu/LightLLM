@@ -224,6 +224,7 @@ class ChatCompletionRequest(BaseModel):
 
     # OpenAI parameters for reasoning and others
     reasoning_effort: Optional[Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]] = None
+    thinking: Optional[Dict[str, Any]] = None
     chat_template_kwargs: Optional[Dict] = None
     separate_reasoning: Optional[bool] = True
     stream_reasoning: Optional[bool] = False
@@ -278,6 +279,11 @@ class ChatCompletionRequest(BaseModel):
             if "thinking" not in self.chat_template_kwargs and "enable_thinking" not in self.chat_template_kwargs:
                 self.chat_template_kwargs["enable_thinking"] = self.reasoning_effort != "none"
 
+        if isinstance(self.thinking, dict) and self.thinking.get("type") in {"enabled", "disabled"}:
+            if self.chat_template_kwargs is None:
+                self.chat_template_kwargs = {}
+            self.chat_template_kwargs["enable_thinking"] = self.thinking["type"] == "enabled"
+
         if not self.chat_template_kwargs:
             return self
         if "thinking" not in self.chat_template_kwargs and "enable_thinking" in self.chat_template_kwargs:
@@ -292,11 +298,16 @@ class PromptTokensDetails(BaseModel):
     audio_tokens: int = 0
 
 
+class CompletionTokensDetails(BaseModel):
+    reasoning_tokens: int = 0
+
+
 class UsageInfo(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: Optional[int] = 0
     total_tokens: int = 0
     prompt_tokens_details: Optional[PromptTokensDetails] = None
+    completion_tokens_details: Optional[CompletionTokensDetails] = None
 
 
 class ChatMessage(BaseModel):

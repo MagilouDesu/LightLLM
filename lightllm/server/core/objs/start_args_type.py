@@ -14,6 +14,7 @@ class StartArgs:
     host: str = field(default="127.0.0.1")
     port: int = field(default=8000)
     httpserver_workers: int = field(default=1)
+    disable_delay_response_start: bool = field(default=False)
     hypercorn_config: Optional[str] = field(default=None)
     zmq_mode: str = field(
         default="ipc:///tmp/",

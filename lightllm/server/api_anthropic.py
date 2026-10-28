@@ -121,6 +121,19 @@ def _anthropic_to_chat_request(anthropic_body: Dict[str, Any]) -> Tuple[Dict[str
     # This also makes the native Anthropic spelling behave the same as the
     # existing ``extra_body.chat_template_kwargs`` escape hatch.
     anthropic_body = dict(anthropic_body)
+    reasoning = anthropic_body.pop("reasoning", None)
+    output_config = anthropic_body.pop("output_config", None)
+    effort = reasoning.get("effort") if isinstance(reasoning, dict) else None
+    if isinstance(output_config, dict) and output_config.get("effort") is not None:
+        # output_config.effort is the native Messages spelling and takes
+        # precedence over the legacy reasoning.effort alias.
+        effort = output_config["effort"]
+    if effort is not None:
+        extra_body = dict(anthropic_body.get("extra_body") or {})
+        extra_body["reasoning_effort"] = effort
+        extra_body["separate_reasoning"] = True
+        anthropic_body["extra_body"] = extra_body
+
     thinking = anthropic_body.pop("thinking", None)
     if isinstance(thinking, dict) and thinking.get("type") in {"enabled", "disabled"}:
         extra_body = dict(anthropic_body.get("extra_body") or {})
@@ -779,6 +792,7 @@ def _chat_response_to_anthropic(
 
     result = _normalize_anthropic_response(result, requested_model)
     _prepend_thinking_block(result, reasoning_text)
+    result["usage"] = _openai_usage_to_anthropic_usage(openai_dict.get("usage") or {})
     return result
 
 
@@ -821,6 +835,21 @@ def _normalize_anthropic_response(result: Dict[str, Any], requested_model: str) 
     return result
 
 
+def _openai_usage_to_anthropic_usage(usage: Dict[str, Any]) -> Dict[str, Any]:
+    prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
+    output_tokens = int(usage.get("completion_tokens", 0) or 0)
+    cached_tokens = int((usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0) or 0)
+    reasoning_tokens = int((usage.get("completion_tokens_details") or {}).get("reasoning_tokens", 0) or 0)
+    cached_tokens = min(max(cached_tokens, 0), max(prompt_tokens, 0))
+    return {
+        "input_tokens": max(prompt_tokens - cached_tokens, 0),
+        "output_tokens": output_tokens,
+        "output_tokens_details": {"reasoning_tokens": max(reasoning_tokens, 0)},
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": cached_tokens,
+    }
+
+
 def _fallback_openai_to_anthropic(openai_dict: Dict[str, Any], requested_model: str) -> Dict[str, Any]:
     """Minimal hand-built OpenAI->Anthropic translation for text-only responses.
 
@@ -855,12 +884,7 @@ def _fallback_openai_to_anthropic(openai_dict: Dict[str, Any], requested_model: 
         "content": content,
         "stop_reason": _FINISH_REASON_TO_STOP_REASON.get(finish_reason, "end_turn"),
         "stop_sequence": None,
-        "usage": {
-            "input_tokens": int(usage.get("prompt_tokens", 0)),
-            "output_tokens": int(usage.get("completion_tokens", 0)),
-            "cache_creation_input_tokens": 0,
-            "cache_read_input_tokens": 0,
-        },
+        "usage": _openai_usage_to_anthropic_usage(usage),
     }
 
 
@@ -942,6 +966,8 @@ async def _openai_sse_to_anthropic_events(
     final_stop_reason = "end_turn"
     final_output_tokens = 0
     final_input_tokens = 0
+    final_cache_read_input_tokens = 0
+    final_reasoning_tokens = 0
 
     _OPENAI_TO_ANTHROPIC_STOP = {
         "stop": "end_turn",
@@ -991,8 +1017,11 @@ async def _openai_sse_to_anthropic_events(
             # tokenizer-accurate count on any upstream change.
             usage = chunk.get("usage")
             if usage:
-                final_input_tokens = int(usage.get("prompt_tokens", 0))
-                final_output_tokens = int(usage.get("completion_tokens", final_output_tokens))
+                anthropic_usage = _openai_usage_to_anthropic_usage(usage)
+                final_input_tokens = anthropic_usage["input_tokens"]
+                final_output_tokens = anthropic_usage["output_tokens"]
+                final_cache_read_input_tokens = anthropic_usage["cache_read_input_tokens"]
+                final_reasoning_tokens = anthropic_usage["output_tokens_details"]["reasoning_tokens"]
 
             choices = chunk.get("choices") or []
             if not choices:
@@ -1199,7 +1228,13 @@ async def _openai_sse_to_anthropic_events(
             {
                 "type": "message_delta",
                 "delta": {"stop_reason": final_stop_reason, "stop_sequence": None},
-                "usage": {"input_tokens": final_input_tokens, "output_tokens": final_output_tokens},
+                "usage": {
+                    "input_tokens": final_input_tokens,
+                    "output_tokens": final_output_tokens,
+                    "output_tokens_details": {"reasoning_tokens": final_reasoning_tokens},
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": final_cache_read_input_tokens,
+                },
             },
         )
         yield _sse_event("message_stop", {"type": "message_stop"})

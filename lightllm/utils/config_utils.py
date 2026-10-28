@@ -319,6 +319,29 @@ def get_eos_token_ids(model_path: str) -> Optional[List[int]]:
     return
 
 
+_single_token_id_cache = {}
+
+
+def get_token_id(token: str) -> int:
+    cached = _single_token_id_cache.get(token)
+    if cached is not None:
+        return cached
+
+    from transformers import PreTrainedTokenizerBase
+
+    from lightllm.server.build_prompt import tokenizer
+
+    hf_tokenizer = tokenizer
+    while not isinstance(hf_tokenizer, PreTrainedTokenizerBase) and hasattr(hf_tokenizer, "tokenizer"):
+        hf_tokenizer = hf_tokenizer.tokenizer
+    token_ids = hf_tokenizer.encode(token, add_special_tokens=False)
+    if len(token_ids) != 1:
+        raise ValueError(f"reasoning delimiter {token!r} encodes to {token_ids}, expected one token id")
+    token_id = int(token_ids[0])
+    _single_token_id_cache[token] = token_id
+    return token_id
+
+
 def get_model_architectures(model_path: str):
     try:
         config_json = get_config_json(model_path)

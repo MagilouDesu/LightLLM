@@ -475,6 +475,7 @@ class DPChunkedPrefillBackend(ModeBackend):
 
     def decode_mtp(self, event_pack: OverlapEventPack, decode_reqs: List[InferReq]):
         """复用普通 SpecEngine 执行 DP speculative draft-and-verify。"""
+        mtp_utils.flush_staged_constraint_tokens(self)
 
         model_input, run_reqs = prepare_decode_inputs(req_objs=decode_reqs)
         spec_engine = self.spec_engine
@@ -562,6 +563,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     b_req_mtp_start_loc=b_req_mtp_start_loc,
                     b_req_idx=model_input.b_req_idx,
                     mtp_accept_len=mtp_accept_len,
+                    reqs=decode_reqs,
                 )
                 (
                     next_token_ids_cpu,
@@ -723,6 +725,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         return
 
     def decode_overlap_mtp(self, event_pack: OverlapEventPack, decode_reqs: List[InferReq]):
+        mtp_utils.flush_staged_constraint_tokens(self)
         (
             model_input0,
             run_reqs0,
@@ -848,6 +851,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     b_req_mtp_start_loc=b_req_mtp_start_loc,
                     b_req_idx=b_req_idx,
                     mtp_accept_len=mtp_accept_len,
+                    reqs=decode_reqs,
                 )
 
             if req_num > 0:

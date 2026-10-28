@@ -262,6 +262,7 @@ class ChunkedPrefillBackend(ModeBackend):
         decode_reqs: List[InferReq],
     ):
         """Run the speculative draft-and-verify decode flow."""
+        mtp_utils.flush_staged_constraint_tokens(self)
         model_input, run_reqs = prepare_decode_inputs(decode_reqs)
         spec_engine = self.spec_engine
         req_num = len(decode_reqs)
@@ -283,6 +284,8 @@ class ChunkedPrefillBackend(ModeBackend):
                 async_selected_row_mask_cpu.wait()
                 selected_rows = async_selected_row_mask_cpu.tensor.tolist()
                 run_reqs = [req for req, selected in zip(run_reqs, selected_rows) if selected]
+            if self.decode_mask_func is not None and self.args.output_constraint_mode == "xgrammar":
+                self.decode_mask_func(run_reqs, model_output.logits, model_input.b_mtp_index)
             next_token_ids, next_token_logprobs = sample(
                 model_output.logits,
                 run_reqs,
@@ -331,6 +334,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
                 b_req_idx=model_input.b_req_idx,
                 mtp_accept_len=mtp_accept_len,
+                reqs=decode_reqs,
             )
 
             (
