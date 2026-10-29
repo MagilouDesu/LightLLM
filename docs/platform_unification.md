@@ -79,14 +79,17 @@ python -m pytest -q \
   unit_tests/models/test_draft_registry_target.py \
   unit_tests/platform/test_runtime_tensor_copy.py \
   unit_tests/platform/test_mlu_sdpa_prefill.py \
-  unit_tests/utils/test_maca_host_registration.py
+  unit_tests/utils/test_maca_host_registration.py \
+  unit_tests/common/basemodel/triton_kernel/linear_att/test_fused_recurrent_strided.py
 ```
 
-On 2026-10-29, these checks passed with 52 tests on A100, 52 on C500, and 51 on
-MLU, where the CUDA-specific foreach test was skipped. They cover image layout
+On 2026-10-29, these checks passed with 55 tests on A100, 55 on C500, and 51 on
+MLU. The CUDA-specific foreach test and GDN kernel test module were skipped on
+MLU. They cover image layout
 against the Transformers processor, storage-preserving copies, causal prefill
 with paged KV and cached prefixes, version-dependent host registration, and
-native device-graph replay after refreshing captured inputs.
+native device-graph replay after refreshing captured inputs, and strided GDN
+decode inputs on CUDA-compatible devices.
 
 The API smoke runner generates solid-color images and exercises text, one image,
 two ordered images, repeated-image caching and a large sliced image:
@@ -95,10 +98,11 @@ two ordered images, repeated-image caching and a large sliced image:
 python test/test_api/multimodal_platform_smoke.py --base-url http://127.0.0.1:8000
 ```
 
-LLaVA-1.5-7B and InternVL3.5-4B passed all five requests on each of A100, C500
-and MLU590 with single-device inference, SDPA vision attention and text decode
-graphs disabled. MLU used SDPA text prefill; CUDA and MACA used Triton prefill.
+LLaVA-1.5-7B, InternVL3.5-4B and MiniCPM-V-4.6 passed all five requests on each
+of A100, C500 and MLU590 with single-device inference, SDPA vision attention and
+text decode graphs disabled. MLU used SDPA text prefill; CUDA and MACA used
+Triton prefill. The MiniCPM checks used 16x downsampling and a bounded linear
+attention cache for functional validation.
 Generated fixture checks establish API integration, not benchmark accuracy.
-Additional model validation is recorded in the pull request. These checks do
-not establish support for every model, quantization format, distributed topology
-or PD/DSpark configuration.
+These checks do not establish support for every model, quantization format,
+distributed topology or PD/DSpark configuration.
