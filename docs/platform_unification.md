@@ -4,6 +4,8 @@ The platform refactor provides a shared model and serving implementation with
 `cuda`, `maca` and `mlu` backends. This change ports the existing LLaVA, InternVL
 and MiniCPM-V-4.6 adaptations onto that interface.
 
+Ascend 910B setup and validation are documented in [ascend_910b.md](ascend_910b.md).
+
 ## Runtime selection
 
 Use the vendor environment for each device. PyTorch, Triton, collective libraries

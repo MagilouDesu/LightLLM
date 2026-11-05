@@ -10,7 +10,7 @@ from .graph_utils import weak_ref_tensor
 from ..base_att import AttControl
 
 
-@register_att_backend(name="paged_fa3", category="standard", platforms=("ascend",), validate_name="fa3")
+@register_att_backend(name="paged_fa3", category="standard", platforms=("ascend",), validate_name="ascend_fia")
 class PagedFa3AscendAttBackend(PagedFa3AttBackend):
 
     def get_causal_attn_mask(self, device):

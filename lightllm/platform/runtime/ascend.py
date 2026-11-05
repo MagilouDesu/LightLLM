@@ -4,6 +4,10 @@ from lightllm.platform.base.runtime import BackendRuntime
 
 
 class AscendRuntime(BackendRuntime):
+
+    def __init__(self) -> None:
+        # Register NPU devices and HCCL only when this runtime is selected.
+        import torch_npu  # noqa: F401
     
     @property
     def device_type(self) -> str:

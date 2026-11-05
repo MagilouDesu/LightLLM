@@ -45,7 +45,7 @@ def test_native_graph_replay_uses_refreshed_inputs():
     from lightllm.platform import get_backend
 
     backend = get_backend()
-    if backend.name not in {"cuda", "maca", "mlu"} or not backend.runtime.is_available():
+    if backend.name not in {"cuda", "maca", "mlu", "ascend"} or not backend.runtime.is_available():
         pytest.skip("Requires a supported accelerator runtime")
     runtime = backend.runtime
     device = runtime.target_device(0)
