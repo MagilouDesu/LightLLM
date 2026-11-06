@@ -88,7 +88,7 @@ def _validate_ascend_fia():
             input_layout="BNSD",
             num_heads=heads,
             num_key_value_heads=kv_heads,
-            scale=dim**-0.5,
+            scale=dim ** -0.5,
             actual_seq_lengths_kv=[seq],
             atten_mask=mask if causal else None,
             sparse_mode=3 if causal else 0,

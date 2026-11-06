@@ -16,7 +16,7 @@ pip install --no-deps -e .
 export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 
 PAGE_SIZE=128 ASCEND_RT_VISIBLE_DEVICES=0 python -m lightllm.server.api_server \
-  --hardware_platform ascend --model_dir /path/to/Qwen3-0.6B \
+  --hardware_platform ascend --model_dir /path/to/Qwen3-0.6B --port 8910 \
   --data_type bf16 --max_total_token_num 4096 --batch_max_tokens 512 \
   --running_max_req_size 8 --max_req_total_len 1024 --disable_cudagraph
 ```

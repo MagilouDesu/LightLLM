@@ -91,7 +91,7 @@ def ffn(
 
 
 @register_op(
-    "ascend", 
+    "ascend",
     out=lambda kwargs: (
         (kwargs["input_ids"].shape[0], kwargs["weight"].shape[1]),
         kwargs["weight"].dtype,
@@ -113,7 +113,7 @@ def embedding(
 
 
 @register_op(
-    "ascend", 
+    "ascend",
     out=lambda kwargs: (
         (kwargs["weight"].shape[0], kwargs["input"].shape[1]),
         kwargs["weight"].dtype,
@@ -156,6 +156,7 @@ def rms_norm(
         return out
 
     return _out
+
 
 @register_op("ascend", out=out_like("input"))
 def layer_norm(
