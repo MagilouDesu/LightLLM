@@ -44,6 +44,10 @@ def tensor_to_no_ref_tensor(origin_tensor: torch.Tensor) -> torch.Tensor:
         torch.Tensor: 无引用计数的tensor
     """
     assert origin_tensor.is_contiguous(), "Only support contiguous tensor"
+    if origin_tensor.device.type == "npu":
+        from torch_npu._C import _weak_ref_tensor
+
+        return _weak_ref_tensor(origin_tensor)
     if origin_tensor.device.type in ("musa", "mlu"):
         return _musa_no_ref_tensor(origin_tensor)
     device_ptr = origin_tensor.data_ptr()
