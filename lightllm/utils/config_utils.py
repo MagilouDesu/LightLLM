@@ -293,7 +293,15 @@ def get_eos_token_ids(model_path: str) -> Optional[List[int]]:
     try:
         config_json = get_config_json(model_path)
         model_type = config_json.get("model_type") or config_json.get("text_config", {}).get("model_type")
-        if model_type in {"qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text", "minicpmv4_6", "llava"}:
+        if model_type in {
+            "qwen3_5",
+            "sensenova_loop",
+            "qwen3_5_text",
+            "qwen3_5_moe",
+            "qwen3_5_moe_text",
+            "minicpmv4_6",
+            "llava",
+        }:
             from transformers import AutoTokenizer
 
             eos_token_ids = []
@@ -499,7 +507,7 @@ def has_vision_module(model_path: str) -> bool:
         ):
             # Qwen3OmniMoeVisionTransformerPretrainedModel
             return True
-        elif model_type in ["qwen3_5", "qwen3_5_moe"]:
+        elif model_type in ["qwen3_5", "sensenova_loop", "qwen3_5_moe"]:
             return True
         elif model_type == "minicpmv4_6":
             return model_cfg.get("vision_config") is not None
@@ -540,10 +548,14 @@ def is_linear_att_mixed_model(model_path: str) -> bool:
 
         model_cfg, _ = PretrainedConfig.get_config_dict(model_path)
         model_type = model_cfg["model_type"]
-        if model_type in ["qwen3_5", "qwen3_5_moe", "qwen3_5_text", "qwen3_5_moe_text", "minicpmv4_6"]:
-            return True
-        else:
-            return False
+        return model_type in [
+            "qwen3_5",
+            "sensenova_loop",
+            "qwen3_5_moe",
+            "qwen3_5_text",
+            "qwen3_5_moe_text",
+            "minicpmv4_6",
+        ]
     except:
         logger.info(f"model path: {model_path} does not has linear hybrid attention")
         return False
@@ -573,7 +585,7 @@ def get_tool_call_parser_for_model(model_path: str) -> Optional[str]:
         return None
 
     # Qwen3.5 series
-    if model_type in ["qwen3_5", "qwen3_5_moe", "qwen3_5_text", "qwen3_5_moe_text", "minicpmv4_6"]:
+    if model_type in ["qwen3_5", "sensenova_loop", "qwen3_5_moe", "qwen3_5_text", "qwen3_5_moe_text", "minicpmv4_6"]:
         return "qwen3_coder"
 
     # Qwen3 series
@@ -619,6 +631,7 @@ def get_reasoning_parser_for_model(model_path: str) -> Optional[str]:
         "qwen3_vl_moe_text",
         "qwen3_omni_moe",
         "qwen3_5",
+        "sensenova_loop",
         "qwen3_5_moe",
         "qwen3_5_text",
         "qwen3_5_moe_text",
