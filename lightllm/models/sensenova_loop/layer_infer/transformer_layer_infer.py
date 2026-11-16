@@ -1,4 +1,5 @@
 from lightllm.models.sensenova_loop.triton_kernel.mhc import hc_contract, hc_expand, hc_post, hc_pre_norm
+from lightllm.models.sensenova_loop.triton_kernel.mhc.metax.post import hc_post_metax
 from lightllm.models.sensenova_loop.triton_kernel.mhc.metax.pre_norm import hc_pre_norm_metax, is_maca_mhc
 from lightllm.models.sensenova_loop.triton_kernel.mhc.pre_norm import has_deepgemm_mhc
 from lightllm.models.qwen3_5.layer_infer.transformer_layer_infer import Qwen35TransformerLayerInfer
@@ -45,7 +46,10 @@ class SenseNovaLoopTransformerLayerInfer(Qwen35TransformerLayerInfer):
 
     def _mhc_post(self, residual, branch, mix, post):
         # SenseNova routers map output -> input; the common kernel uses input -> output.
-        return hc_post(branch, residual, mix.transpose(1, 2), post, self.mhc["streams"])
+        if self.use_metax_mhc:
+            return hc_post_metax(branch, residual, mix.transpose(1, 2), post, self.mhc["streams"])
+        else:
+            return hc_post(branch, residual, mix.transpose(1, 2), post, self.mhc["streams"])
 
     def _mhc_forward(self, hidden, infer_state, layer_weight, *, prefill):
         streams = self.mhc["streams"]

@@ -545,8 +545,6 @@ def _causal_conv1d_fn_triton(
     dim = x.shape[0]
     total = x.shape[1]
     nseq = query_start_loc.shape[0] - 1
-    if nseq <= 0 or total <= 0:
-        return x
 
     if _conv_state_feat_last(conv_states, dim):
         stride_st_slot, stride_st_w, stride_st_d = conv_states.stride()
@@ -554,9 +552,14 @@ def _causal_conv1d_fn_triton(
         stride_st_slot, stride_st_d, stride_st_w = conv_states.stride()
 
     out = torch.empty_like(x)
+
+    if torch.cuda.is_current_stream_capturing() or nseq <= 1 or total < 8192:
+        time_tokens = total
+    else:
+        time_tokens = int((query_start_loc[1:] - query_start_loc[:-1]).max().item())
     grid = (
         nseq,
-        triton.cdiv(total, _TRITON_CONV_BLOCK_T),
+        triton.cdiv(max(time_tokens, 0), _TRITON_CONV_BLOCK_T),
         triton.cdiv(dim, _TRITON_CONV_BLOCK_D),
     )
     _causal_conv1d_varlen_kernel[grid](

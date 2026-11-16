@@ -265,6 +265,15 @@ def _get_chunk_delta_h_run_key(k, u):
     return k.shape[0] * k.shape[2]
 
 
+def _prefer_maca_fwd_h_tile(run_config, T, cu_seqlens=None, batch=1):
+    if not is_maca() or int(run_config.get("BV", 64)) >= 32:
+        return run_config
+    nseq = batch if cu_seqlens is None else int(cu_seqlens.shape[0]) - 1
+    if nseq < 32 or T < nseq * 512:
+        return run_config
+    return {"BV": 32, "num_warps": 2, "num_stages": 1}
+
+
 @autotune(
     kernel_name="chunk_gated_delta_rule_fwd_h",
     configs_gen_func=_get_chunk_delta_h_configs,
@@ -313,6 +322,7 @@ def chunk_gated_delta_rule_fwd_h(
             run_config = {"BV": 32, "num_warps": 2, "num_stages": 1}
         else:
             run_config = {"BV": 64, "num_warps": 2, "num_stages": 2}
+    run_config = _prefer_maca_fwd_h_tile(run_config, T, cu_seqlens, B)
 
     BV = run_config.get("BV", 64)
     num_warps = run_config.get("num_warps", 2)
