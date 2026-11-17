@@ -15,20 +15,16 @@ import triton.language as tl
 
 from .index import prepare_chunk_indices, prepare_chunk_offsets
 from .op import exp, safe_exp
-from .utils import check_shared_mem, is_maca
+from .utils import check_shared_mem
 from lightllm.common.triton_utils.autotuner import autotune
+from lightllm.utils.device_utils import is_maca
 
 NUM_WARPS = [2, 4, 8, 16]
 
 
 def _low_shared_mem() -> bool:
-    try:
-        from lightllm.platform import get_backend
-
-        if get_backend().name == "maca":
-            return True
-    except Exception:
-        pass
+    if is_maca():
+        return True
     return not check_shared_mem()
 
 

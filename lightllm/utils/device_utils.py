@@ -380,3 +380,8 @@ def get_target_device(device_id: Optional[int] = None) -> torch.device:
 @lru_cache(maxsize=1)
 def is_corex() -> bool:
     return get_backend().name == "corex"
+
+
+@lru_cache(maxsize=1)
+def is_maca() -> bool:
+    return get_backend().name == "maca"
