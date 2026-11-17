@@ -3,10 +3,9 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["tokens"])
 def _mrope_prefill_kernel_910b4(
-    TOKENS: tl.constexpr,
-    BT: tl.constexpr,
+    tokens,
     q,
     k,
     Cos,
@@ -22,15 +21,16 @@ def _mrope_prefill_kernel_910b4(
     stride_kbs,
     stride_kh,
     stride_kd,
+    BT: tl.constexpr,
     is_interleaved: tl.constexpr,
     HEAD_Q: tl.constexpr,
     HEAD_K: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
 ):
-    for task in range(tl.program_id(0), (HEAD_Q + HEAD_K) * tl.cdiv(TOKENS, BT), 24):
-        head_index = task // tl.cdiv(TOKENS, BT)
-        seq_index = ((task % tl.cdiv(TOKENS, BT)) * BT + tl.arange(0, BT))[:, None]
-        valid = seq_index < TOKENS
+    for task in range(tl.program_id(0), (HEAD_Q + HEAD_K) * tl.cdiv(tokens, BT), 24):
+        head_index = task // tl.cdiv(tokens, BT)
+        seq_index = ((task % tl.cdiv(tokens, BT)) * BT + tl.arange(0, BT))[:, None]
+        valid = seq_index < tokens
 
         dim_range0 = tl.arange(0, BLOCK_DMODEL // 2)[None, :]
         dim_range1 = dim_range0 + BLOCK_DMODEL // 2
@@ -115,8 +115,7 @@ def mrope_prefill(
     rotary_dim = int(q.shape[2] * partial_rotary_factor)
     # Limit the tile area: 256 rotary dimensions at BT64 exceed local UB.
     _mrope_prefill_kernel_910b4[(24,)](
-        TOKENS=q.shape[0],
-        BT=min(64, 8192 // rotary_dim),
+        tokens=q.shape[0],
         q=q,
         k=k,
         Cos=cos,
@@ -132,6 +131,7 @@ def mrope_prefill(
         stride_kbs=k.stride(0),
         stride_kh=k.stride(1),
         stride_kd=k.stride(2),
+        BT=min(64, 8192 // rotary_dim),
         is_interleaved=is_interleaved,
         HEAD_Q=q.shape[1],
         HEAD_K=k.shape[1],

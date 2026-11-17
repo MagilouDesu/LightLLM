@@ -7,38 +7,30 @@ import triton.language as tl
 from .op import exp
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["tokens"])
 def _prepare_recurrent_qk_npu(
     q,
     k,
     q_out,
     k_out,
-    rows,
+    tokens,
     H: tl.constexpr,
     K: tl.constexpr,
     STRIDE_Q: tl.constexpr,
     STRIDE_K: tl.constexpr,
-    BK: tl.constexpr,
     BT: tl.constexpr,
 ):
-    for block in range(tl.program_id(0), tl.cdiv(rows, BT), tl.num_programs(0)):
-        row = block * BT + tl.arange(0, BT)
-        col = tl.arange(0, BK)
-        mask = (row[:, None] < rows) & (col[None, :] < K)
-        q_val = tl.load(
-            q + (row // H)[:, None] * STRIDE_Q + (row % H)[:, None] * K + col[None, :],
-            mask=mask,
-            other=0,
-        ).to(tl.float32)
-        k_val = tl.load(
-            k + (row // H)[:, None] * STRIDE_K + (row % H)[:, None] * K + col[None, :],
-            mask=mask,
-            other=0,
-        ).to(tl.float32)
-        q_val = q_val / tl.sqrt(tl.sum(q_val * q_val, axis=1) + 1e-6)[:, None]
-        k_val = k_val / tl.sqrt(tl.sum(k_val * k_val, axis=1) + 1e-6)[:, None]
-        tl.store(q_out + row[:, None] * K + col[None, :], q_val, mask=mask)
-        tl.store(k_out + row[:, None] * K + col[None, :], k_val, mask=mask)
+    col = tl.arange(0, K)
+    for block in range(tl.program_id(0), tl.cdiv(tokens, BT), tl.num_programs(0)):
+        token = block * BT + tl.arange(0, BT)
+        safe = tl.where(token < tokens, token, 0)
+        for head in tl.static_range(H):
+            q_val = tl.load(q + safe[:, None] * STRIDE_Q + head * K + col[None, :]).to(tl.float32)
+            k_val = tl.load(k + safe[:, None] * STRIDE_K + head * K + col[None, :]).to(tl.float32)
+            q_val = q_val / tl.sqrt(tl.sum(q_val * q_val, axis=1) + 1e-6)[:, None]
+            k_val = k_val / tl.sqrt(tl.sum(k_val * k_val, axis=1) + 1e-6)[:, None]
+            tl.store(q_out + (token[:, None] * H + head) * K + col[None, :], q_val)
+            tl.store(k_out + (token[:, None] * H + head) * K + col[None, :], k_val)
 
 
 @triton.jit
@@ -252,7 +244,7 @@ def fused_recurrent_gated_delta_rule_npu(
     assert g.ndim == 3 and beta.ndim == 3
 
     optimize = (
-        q.shape[1] >= 4096 * sequence_num
+        q.shape[1] >= 96 * sequence_num
         and value_head_num > 1
         and key_dim in (64, 128)
         and value_dim in (64, 128)
@@ -261,23 +253,28 @@ def fused_recurrent_gated_delta_rule_npu(
     )
     if optimize:
         if use_qk_l2norm_in_kernel:
-            normalized_q = torch.empty(q.shape, dtype=torch.float32, device=q.device)
-            normalized_k = torch.empty(k.shape, dtype=torch.float32, device=k.device)
+            tokens = q.shape[1]
+            pad_tokens = triton.cdiv(tokens, 16) * 16
+            normalized_q = torch.empty((1, pad_tokens, key_head_num, key_dim), dtype=torch.float32, device=q.device)
+            normalized_k = torch.empty((1, pad_tokens, key_head_num, key_dim), dtype=torch.float32, device=k.device)
             _prepare_recurrent_qk_npu[(48,)](
                 q,
                 k,
                 normalized_q,
                 normalized_k,
-                q.shape[1] * key_head_num,
+                tokens,
                 H=key_head_num,
                 K=key_dim,
                 STRIDE_Q=stride_q_token,
                 STRIDE_K=stride_k_token,
-                BK=key_dim,
                 BT=16,
                 multibuffer=False,
             )
-            q, k = normalized_q, normalized_k
+            q = normalized_q[:, :tokens]
+            k = normalized_k[:, :tokens]
+            if pad_tokens != tokens:
+                q = q.contiguous()
+                k = k.contiguous()
         from .chunk_prefill_npu import chunk_prefill_npu
 
         return chunk_prefill_npu(q, k, v, g, beta, initial_state, cu_seqlens, state_indices, scale)

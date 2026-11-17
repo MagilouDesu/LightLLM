@@ -2,6 +2,7 @@ from lightllm.models.sensenova_loop.triton_kernel.mhc import hc_contract, hc_exp
 from lightllm.models.sensenova_loop.triton_kernel.mhc.corex.pre_norm import hc_pre_norm_corex, is_corex_mhc
 from lightllm.models.sensenova_loop.triton_kernel.mhc.metax.post import hc_post_metax
 from lightllm.models.sensenova_loop.triton_kernel.mhc.metax.pre_norm import hc_pre_norm_metax, is_maca_mhc
+from lightllm.models.sensenova_loop.triton_kernel.mhc.npu.pre_norm import hc_pre_norm_npu, is_npu_mhc
 from lightllm.models.sensenova_loop.triton_kernel.mhc.pre_norm import has_deepgemm_mhc
 from lightllm.models.qwen3_5.layer_infer.transformer_layer_infer import Qwen35TransformerLayerInfer
 
@@ -17,6 +18,7 @@ class SenseNovaLoopTransformerLayerInfer(Qwen35TransformerLayerInfer):
             return
         self.use_metax_mhc = is_maca_mhc()
         self.use_corex_mhc = is_corex_mhc()
+        self.use_npu_mhc = is_npu_mhc()
         self.use_deepgemm_mhc = self.mhc["streams"] == 4 and has_deepgemm_mhc()
         self.mhc_entry = self.physical_layer_num == self.mhc["start"]
         self.mhc_exit = self.physical_layer_num == self.mhc["end"] - 1
@@ -46,6 +48,8 @@ class SenseNovaLoopTransformerLayerInfer(Qwen35TransformerLayerInfer):
             return hc_pre_norm_metax(**kwargs)
         if self.use_corex_mhc:
             return hc_pre_norm_corex(**kwargs)
+        if self.use_npu_mhc:
+            return hc_pre_norm_npu(**kwargs, use_deepgemm=self.use_deepgemm_mhc)
         return hc_pre_norm(**kwargs, use_deepgemm=self.use_deepgemm_mhc)
 
     def _mhc_post(self, residual, branch, mix, post):

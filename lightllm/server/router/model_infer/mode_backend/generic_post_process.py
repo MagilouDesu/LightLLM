@@ -124,7 +124,20 @@ def _top_p_top_k(probs: torch.Tensor, top_ps: torch.Tensor, top_ks: torch.Tensor
     probs_sort[(probs_sum - probs_sort) > top_ps.view(-1, 1)] = 0.0
 
     probs_sort[torch.arange(0, probs.shape[-1], device=probs.device).view(1, -1) >= top_ks.view(-1, 1)] = 0.0
+    return probs_sort, probs_idx
 
+
+def _top_p_top_k_ascend(probs: torch.Tensor, top_ps: torch.Tensor, top_ks: torch.Tensor):
+    vocab_size = probs.shape[-1]
+    max_k = int(top_ks.max().item())
+    if max_k <= 0 or max_k >= vocab_size:
+        return _top_p_top_k(probs, top_ps, top_ks)
+
+    probs_sort, probs_idx = torch.topk(probs, max_k, dim=-1)
+    rank = torch.arange(max_k, device=probs.device).view(1, -1)
+    probs_sort = probs_sort.masked_fill(rank >= top_ks.view(-1, 1), 0)
+    probs_sum = torch.cumsum(probs_sort, dim=-1)
+    probs_sort = probs_sort.masked_fill((probs_sum - probs_sort) > top_ps.view(-1, 1), 0)
     return probs_sort, probs_idx
 
 
@@ -158,6 +171,22 @@ def top_p_top_k_sample_triton(
             sampled_index = torch.multinomial(probs_sort, num_samples=1, replacement=True)
         else:
             sampled_index = _random_sample(probs_sort, generators).view(-1, 1)
+        next_token_ids = torch.gather(probs_idx, dim=1, index=sampled_index)
+        next_token_logprobs = torch.log(torch.gather(probs_sort, dim=1, index=sampled_index))
+        return next_token_ids.view(-1), next_token_logprobs.view(-1)
+
+    elif sampling_backend == "ascend":
+        probs_sort, probs_idx = _top_p_top_k_ascend(probs, top_ps, top_ks)
+        if probs_sort.shape[-1] == probs.shape[-1]:
+            sample_probs = probs_sort
+        else:
+            sample_probs = probs.new_zeros(probs.shape)
+            sample_probs[:, : probs_sort.shape[-1]] = probs_sort
+        if generators is None:
+            sampled_index = torch.multinomial(sample_probs, num_samples=1, replacement=True)
+        else:
+            sampled_index = _random_sample(sample_probs, generators).view(-1, 1)
+            probs_sort = sample_probs
         next_token_ids = torch.gather(probs_idx, dim=1, index=sampled_index)
         next_token_logprobs = torch.log(torch.gather(probs_sort, dim=1, index=sampled_index))
         return next_token_ids.view(-1), next_token_logprobs.view(-1)

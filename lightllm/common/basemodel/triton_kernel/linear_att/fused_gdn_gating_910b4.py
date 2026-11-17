@@ -12,7 +12,7 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["n"])
 def _gating_910b4(
     G,
     BO,
@@ -20,7 +20,7 @@ def _gating_910b4(
     A,
     B,
     BIAS,
-    N: tl.constexpr,
+    n,
     H: tl.constexpr,
     SA: tl.constexpr,
     SB: tl.constexpr,
@@ -31,18 +31,22 @@ def _gating_910b4(
 ):
     row = tl.program_id(0) * ROWS + tl.arange(0, ROWS)
     head = tl.arange(0, HEADS)
-    al = tl.load(AL + head, head < H, other=0).to(tl.float32)
-    bias = tl.load(BIAS + head, head < H, other=0).to(tl.float32)
-    mask = (row[:, None] < N) & (head[None, :] < H)
-    a = tl.load(A + row[:, None] * SA + head[None, :], mask, other=0).to(tl.float32)
-    b = tl.load(B + row[:, None] * SB + head[None, :], mask, other=0).to(tl.float32)
+    row_ok = row < n
+    head_ok = head < H
+    al = tl.load(AL + head, head_ok, other=0).to(tl.float32)
+    bias = tl.load(BIAS + head, head_ok, other=0).to(tl.float32)
+    a = tl.load(A + row[:, None] * SA + head[None, :], mask=row_ok[:, None], other=0).to(tl.float32)
+    b = tl.load(B + row[:, None] * SB + head[None, :], mask=row_ok[:, None], other=0).to(tl.float32)
+    a = tl.where(head_ok[None, :], a, 0)
+    b = tl.where(head_ok[None, :], b, 0)
     z = a + bias[None, :]
     softplus = tl.where(BETA * z <= THRESHOLD, (1 / BETA) * tl.log(1 + tl.exp(BETA * z)), z)
     g = -tl.exp(al)[None, :] * softplus
     # Preserve the historical BF16 rounding before writing the FP32 beta output.
     beta = tl.sigmoid(b).to(B.dtype.element_ty)
-    tl.store(G + row[:, None] * H + head[None, :], g, mask)
-    tl.store(BO + row[:, None] * H + head[None, :], beta, mask)
+    store_mask = row_ok[:, None] & head_ok[None, :]
+    tl.store(G + row[:, None] * H + head[None, :], g, store_mask)
+    tl.store(BO + row[:, None] * H + head[None, :], beta, store_mask)
 
 
 def fused_gdn_gating_910b4(
