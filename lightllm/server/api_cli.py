@@ -694,9 +694,10 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--sampling_backend",
         type=str,
-        choices=["triton", "maca_triton", "flashinfer"],
+        choices=["triton", "ascend", "maca_triton", "flashinfer"],
         default="triton",
-        help="""sampling used impl. 'triton' is use torch and triton kernel,
+        help="""sampling used impl. 'triton' sorts the full vocab,
+        ascend uses partial top-k on ascend,
         maca_triton uses partial top-k on maca,
         flashinfer use flashinfer sampling impl""",
     )
@@ -751,12 +752,14 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
             "eagle3",
             "dspark",
             "dflash",
+            "dflash2",
             None,
         ],
         default=None,
         help="""Speculative decoding mode.
         *_with_att and *_no_att select attention or non-attention draft models;
         eagle3 uses autoregressive EAGLE-3 drafting; dflash uses block-diffusion drafting;
+        dflash2 uses block-diffusion drafting with local convolutions and candidate reranking;
         dspark uses semi-autoregressive parallel drafting.""",
     )
     parser.add_argument(

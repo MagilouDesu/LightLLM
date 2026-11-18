@@ -1,4 +1,8 @@
 {
+  "1024": {
+    "BLOCK_N": 1024,
+    "num_warps": 1
+  },
   "12": {
     "BLOCK_N": 1024,
     "num_warps": 8
@@ -7,8 +11,20 @@
     "BLOCK_N": 64,
     "num_warps": 1
   },
+  "128": {
+    "BLOCK_N": 1024,
+    "num_warps": 1
+  },
+  "131072": {
+    "BLOCK_N": 64,
+    "num_warps": 1
+  },
   "1536": {
     "BLOCK_N": 128,
+    "num_warps": 1
+  },
+  "16384": {
+    "BLOCK_N": 64,
     "num_warps": 1
   },
   "192": {
@@ -19,6 +35,10 @@
     "BLOCK_N": 128,
     "num_warps": 2
   },
+  "2048": {
+    "BLOCK_N": 512,
+    "num_warps": 2
+  },
   "24": {
     "BLOCK_N": 2048,
     "num_warps": 2
@@ -27,7 +47,19 @@
     "BLOCK_N": 128,
     "num_warps": 1
   },
+  "256": {
+    "BLOCK_N": 256,
+    "num_warps": 2
+  },
   "3072": {
+    "BLOCK_N": 128,
+    "num_warps": 1
+  },
+  "32": {
+    "BLOCK_N": 2048,
+    "num_warps": 2
+  },
+  "32768": {
     "BLOCK_N": 128,
     "num_warps": 1
   },
@@ -47,12 +79,28 @@
     "BLOCK_N": 64,
     "num_warps": 1
   },
+  "512": {
+    "BLOCK_N": 64,
+    "num_warps": 2
+  },
   "6144": {
     "BLOCK_N": 64,
     "num_warps": 1
   },
+  "64": {
+    "BLOCK_N": 4096,
+    "num_warps": 2
+  },
   "768": {
     "BLOCK_N": 256,
+    "num_warps": 1
+  },
+  "8": {
+    "BLOCK_N": 1024,
+    "num_warps": 1
+  },
+  "8192": {
+    "BLOCK_N": 64,
     "num_warps": 1
   },
   "96": {

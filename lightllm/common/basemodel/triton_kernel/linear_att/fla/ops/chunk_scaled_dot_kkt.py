@@ -15,8 +15,8 @@ import triton.language as tl
 
 from .index import prepare_chunk_indices
 from .op import safe_exp
-from .utils import is_maca
 from lightllm.common.triton_utils.autotuner import autotune
+from lightllm.utils.device_utils import is_maca
 
 
 @triton.heuristics(

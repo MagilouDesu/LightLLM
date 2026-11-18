@@ -1,12 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
-
-"""MetaX mHC pre-norm.
-
-main 的 prepare kernel 用 Python range 展开 Sinkhorn，MetaX 的 make_ttgir 会 segfault。
-这里的 kernel 用 tl.static_range。两 stream、tokens <= 128 的投影用 split-K。
-这个形状上 split-K 到 128 行仍不慢于 fp32 GEMM，256 行起 GEMM 更快。
-"""
-
 from __future__ import annotations
 
 from typing import Tuple
@@ -16,6 +7,26 @@ import triton
 import triton.language as tl
 
 from lightllm.models.sensenova_loop.triton_kernel.mhc.pre_norm import _hc_pre_combine_norm_kernel
+
+
+@triton.jit
+def _cast_and_square_kernel(
+    x,
+    y,
+    sq,
+    stride,
+    K,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0)
+    acc = 0.0
+    for k0 in tl.range(0, K, BLOCK):
+        cols = k0 + tl.arange(0, BLOCK)
+        mask = cols < K
+        values = tl.load(x + row * stride + cols, mask=mask, other=0.0).to(tl.float32)
+        tl.store(y + row * stride + cols, values, mask=mask)
+        acc += tl.sum(values * values, axis=0)
+    tl.store(sq + row, acc)
 
 
 def is_maca_mhc() -> bool:
@@ -164,9 +175,19 @@ def hc_pre_norm_metax(
             num_warps=4,
         )
     else:
-        x_fp32 = x.float()
+        x_fp32 = torch.empty(x.shape, dtype=torch.float32, device=x.device)
+        sqrsum = torch.empty((tokens,), dtype=torch.float32, device=x.device)
+        _cast_and_square_kernel[(tokens,)](
+            x,
+            x_fp32,
+            sqrsum,
+            x.stride(0),
+            flattened_hidden,
+            BLOCK=1024,
+            num_warps=4,
+        )
         gemm_partial = (x_fp32 @ fn.T).unsqueeze(0)
-        sqrsum_partial = x_fp32.square().sum(dim=-1).unsqueeze(0)
+        sqrsum_partial = sqrsum.unsqueeze(0)
         n_splits = 1
 
     pre = torch.empty((tokens, streams), dtype=torch.float32, device=x.device)

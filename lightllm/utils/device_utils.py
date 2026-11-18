@@ -106,18 +106,14 @@ def is_musa():
 
 
 @lru_cache(maxsize=1)
-def is_maca():
-    return getattr(torch.version, "maca", None) is not None
-
-
-@lru_cache(maxsize=1)
 def is_nvidia():
+    # Kernel imports can query the vendor before a platform backend is selected.
     ans = (
         torch.cuda.is_available()
         and getattr(torch.version, "cuda", None) is not None
         and getattr(torch.version, "hip", None) is None
         and not is_musa()
-        and not is_maca()
+        and getattr(torch.version, "maca", None) is None
     )
     logger.info(f"device is_nvidia : {ans}")
     return ans
@@ -392,3 +388,8 @@ def get_target_device(device_id: Optional[int] = None) -> torch.device:
 @lru_cache(maxsize=1)
 def is_corex() -> bool:
     return get_backend().name == "corex"
+
+
+@lru_cache(maxsize=1)
+def is_maca() -> bool:
+    return get_backend().name == "maca"

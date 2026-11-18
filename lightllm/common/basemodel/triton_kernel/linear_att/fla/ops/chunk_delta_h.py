@@ -15,20 +15,16 @@ import triton.language as tl
 
 from .index import prepare_chunk_indices, prepare_chunk_offsets
 from .op import exp, safe_exp
-from .utils import check_shared_mem, is_maca
+from .utils import check_shared_mem
 from lightllm.common.triton_utils.autotuner import autotune
+from lightllm.utils.device_utils import is_maca
 
 NUM_WARPS = [2, 4, 8, 16]
 
 
 def _low_shared_mem() -> bool:
-    try:
-        from lightllm.platform import get_backend
-
-        if get_backend().name == "maca":
-            return True
-    except Exception:
-        pass
+    if is_maca():
+        return True
     return not check_shared_mem()
 
 
@@ -265,6 +261,15 @@ def _get_chunk_delta_h_run_key(k, u):
     return k.shape[0] * k.shape[2]
 
 
+def _prefer_maca_fwd_h_tile(run_config, T, cu_seqlens=None, batch=1):
+    if not is_maca() or int(run_config.get("BV", 64)) >= 32:
+        return run_config
+    nseq = batch if cu_seqlens is None else int(cu_seqlens.shape[0]) - 1
+    if nseq < 32 or T < nseq * 512:
+        return run_config
+    return {"BV": 32, "num_warps": 2, "num_stages": 1}
+
+
 @autotune(
     kernel_name="chunk_gated_delta_rule_fwd_h",
     configs_gen_func=_get_chunk_delta_h_configs,
@@ -313,6 +318,7 @@ def chunk_gated_delta_rule_fwd_h(
             run_config = {"BV": 32, "num_warps": 2, "num_stages": 1}
         else:
             run_config = {"BV": 64, "num_warps": 2, "num_stages": 2}
+    run_config = _prefer_maca_fwd_h_tile(run_config, T, cu_seqlens, B)
 
     BV = run_config.get("BV", 64)
     num_warps = run_config.get("num_warps", 2)

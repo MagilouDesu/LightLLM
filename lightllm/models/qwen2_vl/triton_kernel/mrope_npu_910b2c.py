@@ -12,10 +12,9 @@ def can_use_mrope_prefill(q: torch.Tensor, partial_rotary_factor: float) -> bool
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["tokens"])
 def _mrope_prefill_kernel(
-    TOKENS: tl.constexpr,
-    BT: tl.constexpr,
+    tokens,
     q,
     k,
     Cos,
@@ -31,15 +30,16 @@ def _mrope_prefill_kernel(
     stride_kbs,
     stride_kh,
     stride_kd,
+    BT: tl.constexpr,
     is_interleaved: tl.constexpr,
     HEAD_Q: tl.constexpr,
     HEAD_K: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
 ):
-    for task in range(tl.program_id(0), (HEAD_Q + HEAD_K) * tl.cdiv(TOKENS, BT), 24):
-        head_index = task // tl.cdiv(TOKENS, BT)
-        seq_index = ((task % tl.cdiv(TOKENS, BT)) * BT + tl.arange(0, BT))[:, None]
-        valid = seq_index < TOKENS
+    for task in range(tl.program_id(0), (HEAD_Q + HEAD_K) * tl.cdiv(tokens, BT), 24):
+        head_index = task // tl.cdiv(tokens, BT)
+        seq_index = ((task % tl.cdiv(tokens, BT)) * BT + tl.arange(0, BT))[:, None]
+        valid = seq_index < tokens
 
         dim_range0 = tl.arange(0, BLOCK_DMODEL // 2)[None, :]
         dim_range1 = dim_range0 + BLOCK_DMODEL // 2
@@ -68,12 +68,18 @@ def _mrope_prefill_kernel(
             h_mask = (t_end <= offsets) & (offsets < h_end)
             w_mask = (h_end <= offsets) & (offsets < BLOCK_DMODEL // 2)
 
-        t_cos = tl.load(t_cos + offsets, mask=t_mask & valid, other=0)
-        t_sin = tl.load(t_sin + offsets, mask=t_mask & valid, other=0)
-        h_cos = tl.load(h_cos + offsets, mask=h_mask & valid, other=0)
-        h_sin = tl.load(h_sin + offsets, mask=h_mask & valid, other=0)
-        w_cos = tl.load(w_cos + offsets, mask=w_mask & valid, other=0)
-        w_sin = tl.load(w_sin + offsets, mask=w_mask & valid, other=0)
+        t_cos = tl.load(t_cos + offsets, mask=valid, other=0)
+        t_sin = tl.load(t_sin + offsets, mask=valid, other=0)
+        h_cos = tl.load(h_cos + offsets, mask=valid, other=0)
+        h_sin = tl.load(h_sin + offsets, mask=valid, other=0)
+        w_cos = tl.load(w_cos + offsets, mask=valid, other=0)
+        w_sin = tl.load(w_sin + offsets, mask=valid, other=0)
+        t_cos = tl.where(t_mask, t_cos, 0)
+        t_sin = tl.where(t_mask, t_sin, 0)
+        h_cos = tl.where(h_mask, h_cos, 0)
+        h_sin = tl.where(h_mask, h_sin, 0)
+        w_cos = tl.where(w_mask, w_cos, 0)
+        w_sin = tl.where(w_mask, w_sin, 0)
 
         cos = t_cos + h_cos + w_cos
         sin = t_sin + h_sin + w_sin
@@ -118,8 +124,7 @@ def mrope_prefill(
     rotary_dim = int(q.shape[2] * partial_rotary_factor)
     # Limit the tile area: 256 rotary dimensions at BT64 exceed local UB.
     _mrope_prefill_kernel[(24,)](
-        TOKENS=q.shape[0],
-        BT=min(64, 8192 // rotary_dim),
+        tokens=q.shape[0],
         q=q,
         k=k,
         Cos=cos,
@@ -135,6 +140,7 @@ def mrope_prefill(
         stride_kbs=k.stride(0),
         stride_kh=k.stride(1),
         stride_kd=k.stride(2),
+        BT=min(64, 8192 // rotary_dim),
         is_interleaved=is_interleaved,
         HEAD_Q=q.shape[1],
         HEAD_K=k.shape[1],
@@ -142,7 +148,7 @@ def mrope_prefill(
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["tokens"])
 def _mrope_npu_small_kernel(
     q,
     k,
@@ -159,17 +165,17 @@ def _mrope_npu_small_kernel(
     stride_kbs,
     stride_kh,
     stride_kd,
+    tokens,
     is_interleaved: tl.constexpr,
     HEAD_Q: tl.constexpr,
     HEAD_K: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
-    TOKENS: tl.constexpr,
 ):
     # Keep logical programs within the physical grid: auto-blockify's tail can
     # otherwise wrap to head zero/token zero and apply the in-place rotation twice.
-    for task in range(tl.program_id(0), (HEAD_Q + HEAD_K) * TOKENS, tl.num_programs(0)):
-        head_index = task // TOKENS
-        seq_index = task % TOKENS
+    for task in range(tl.program_id(0), (HEAD_Q + HEAD_K) * tokens, tl.num_programs(0)):
+        head_index = task // tokens
+        seq_index = task % tokens
 
         dim_range0 = tl.arange(0, BLOCK_DMODEL // 2)
         dim_range1 = dim_range0 + BLOCK_DMODEL // 2
@@ -269,9 +275,9 @@ def mrope_small(
         k.stride(0),
         k.stride(1),
         k.stride(2),
+        tokens,
         is_interleaved,
         heads_q,
         heads_k,
         rotary,
-        tokens,
     )

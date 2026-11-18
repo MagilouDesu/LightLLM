@@ -173,7 +173,9 @@ class StartArgs:
         default="None", metadata={"choices": ["None", "int8kv", "int4kv", "fp8kv_sph", "fp8kv_spt", "fp8kv_dsa"]}
     )
     llm_kv_quant_group_size: int = field(default=8)
-    sampling_backend: str = field(default="triton", metadata={"choices": ["triton", "maca_triton", "flashinfer"]})
+    sampling_backend: str = field(
+        default="triton", metadata={"choices": ["triton", "ascend", "maca_triton", "flashinfer"]}
+    )
     penalty_counter_mode: str = field(
         default="gpu_counter", metadata={"choices": ["cpu_counter", "pin_mem_counter", "gpu_counter"]}
     )
@@ -192,6 +194,7 @@ class StartArgs:
                 "eagle3",
                 "dspark",
                 "dflash",
+                "dflash2",
                 None,
             ]
         },

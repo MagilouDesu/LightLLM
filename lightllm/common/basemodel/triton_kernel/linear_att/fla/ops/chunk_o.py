@@ -17,18 +17,14 @@ import triton.language as tl
 
 from .index import prepare_chunk_indices
 from .op import exp, safe_exp
-from .utils import FLA_GDN_FIX_BT, check_shared_mem, is_maca, is_nvidia_hopper
+from .utils import FLA_GDN_FIX_BT, check_shared_mem, is_nvidia_hopper
 from lightllm.common.triton_utils.autotuner import autotune
+from lightllm.utils.device_utils import is_maca
 
 
 def _low_shared_mem() -> bool:
-    try:
-        from lightllm.platform import get_backend
-
-        if get_backend().name == "maca":
-            return True
-    except Exception:
-        pass
+    if is_maca():
+        return True
     return not check_shared_mem()
 
 
